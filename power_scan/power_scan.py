@@ -7,6 +7,7 @@ import pandas as pd
 import nifty_ls
 from joblib import Parallel, delayed 
 import matplotlib.pyplot as plt
+from copy import deepcopy
 # import warnings
 # from photutils.utils import NoDetectionsWarning
 
@@ -17,7 +18,7 @@ def _detect_sources(frequency,power,peak=50,fwhm=3):
     from photutils.utils import NoDetectionsWarning
 
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
-    finder = DAOStarFinder(peak,fwhm,exclude_border=True)
+    finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
     sources = None
     #m,med,std = sigma_clipped_stats(power)
     s = finder.find_stars(power)#(power - med)/std)
@@ -30,7 +31,7 @@ def _detect_sources(frequency,power,peak=50,fwhm=3):
         return None
 
 
-def _Spatial_group(result,min_samples=1,distance=0.5,njobs=-1):
+def _Spatial_group(result,min_samples=1,distance=0.5,njobs=-1,write_col='objid'):
     """
     Groups events based on proximity.
     """
@@ -42,8 +43,8 @@ def _Spatial_group(result,min_samples=1,distance=0.5,njobs=-1):
     labels = cluster.labels_
     unique_labels = set(labels)
     for label in unique_labels:
-        result.loc[label == labels,'objid'] = label + 1
-    result['objid'] = result['objid'].astype(int)
+        result.loc[label == labels,write_col] = label + 1
+    result[write_col] = result[write_col].astype(int)
     return result
  
 def compress_freq_groups(result):
@@ -107,7 +108,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
                  snr_lim=5,fwhm=3,dao_peak=50,cpu=-1,snr_search_lim=10,
-                 period_lim='auto',run=True):
+                 period_lim='auto',savepath=None,run=True):
         """
         Detect faint variable objects in time-series image data.
 
@@ -161,6 +162,7 @@ class periodogram_detection():
         self.aperture_radius = aperture_radius
         self.snr_search_lim = snr_search_lim
         self.period_lim = period_lim
+        self.savepath = savepath
 
         # calculated
         self.freq = None
@@ -175,6 +177,8 @@ class periodogram_detection():
         if run:
             self.run()
     
+
+
     
     def clean_data(self):
         good = np.where(np.isfinite(np.sum(self.data,axis=(1,2))))
@@ -237,6 +241,40 @@ class periodogram_detection():
         else:
             self.detections = None
 
+    def _spatial_alias_clean(self,close_freq=1e-3,plot=False):
+        sources = deepcopy(self.sources)
+        groups = _Spatial_group(sources,distance=3,write_col='id2')
+        ids = groups['id2'].unique()
+        keep = pd.DataFrame([])
+        for i in ids:
+            group = groups.loc[groups['id2']==i]
+            group.reset_index(drop=True, inplace=True)
+            if len(group) > 1:
+                mod1 = (group.freq.values[:,np.newaxis] / group.freq.values[np.newaxis,:]) % 1
+                mod2 = 1/(group.freq.values[:,np.newaxis] / group.freq.values[np.newaxis,:]) % 1 # invert to get higher order alias
+                # make a symmetric array
+                sym = (mod1 < close_freq) | (mod2 < close_freq)
+                unique = np.unique(sym,axis=0)
+                for u in unique:
+                    if np.sum(u) > 1:
+                        snr = group.loc[u,'flux']
+                        ind = np.argmax(snr)
+                        adding = pd.DataFrame([group.loc[ind]]) # pandas is trash
+                        keep = pd.concat([keep,adding], ignore_index=True)
+                        if plot:
+                            print(group.objid.values)
+                            self.plot_object(index=group.objid.values-1)
+                    else:
+                        keep = pd.concat([keep,group.loc[u]], ignore_index=True)
+            
+            else:
+                keep = pd.concat([keep,group], ignore_index=True)
+
+        keep = keep.drop(['id2'],axis=1)
+        keep = keep.rename(columns={'objid':'old_objdid','id':'objid'})
+        keep['objid'] = np.arange(1,len(keep)+1,dtype=int)
+        self.sources = keep
+
     def detection_cleaning(self,snr_lim=None):
         if snr_lim is None:
             snr_lim = self.snr_lim
@@ -244,7 +282,7 @@ class periodogram_detection():
         detect = detect.loc[detect['flux'] >= snr_lim]
         sources = _Spatial_group(detect)
         self.sources = compress_freq_groups(sources)
-
+        self._spatial_alias_clean()
 
     def get_lightcurves(self,radius=None):
         if radius is None:
@@ -366,6 +404,24 @@ class periodogram_detection():
             plt.tight_layout()
             if savepath is not None:
                 plt.savefig(f'{savepath}/var_{i}.png')
+
+    def save_detections(self,savepath=None,savename=None):
+        if savepath is None:
+            if self.savepath is None:
+                print('No save path selected, saving to current directory')
+                savepath = '.'
+            else:
+                savepath = self.savepath
+        if savename is None:
+            if self.savename is None:
+                print('No save name selected, saving to: power_scan_var.csv')
+                savename = 'power_scan_var.csv'
+            else:
+                savename = self.savename
+
+        self.sources.to_csv(savepath+savename,index=False)
+
+    #def save_lightcurves(self)
 
     def run(self):
         self.clean_data()
