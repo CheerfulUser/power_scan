@@ -109,7 +109,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
                  snr_lim=5,fwhm=3,dao_peak=50,cpu=-1,snr_search_lim=10,
-                 period_lim='auto',block_size=None,savepath=None,run=True):
+                 period_lim='auto',block_size=None,edge_buffer=0,savepath=None,run=True):
         """
         Detect faint variable objects in time-series image data.
 
@@ -165,6 +165,7 @@ class periodogram_detection():
         self.period_lim = period_lim
         self.savepath = savepath
         self.block_size = block_size
+        self.edge_buffer = edge_buffer
 
         # calculated
         self.freq = None
@@ -326,6 +327,12 @@ class periodogram_detection():
         self.sources = compress_freq_groups(sources)
         self._spatial_alias_clean()
 
+        if self.edge_buffer > 0:
+            xind = (self.sources.xcentroid.values > self.edge_buffer) & (self.sources.xcentroid.values < self.data.shape[2] - self.edge_buffer)
+            yind = (self.sources.ycentroid.values > self.edge_buffer) & (self.sources.ycentroid.values < self.data.shape[1] - self.edge_buffer)
+            ind = xind & yind
+            self.sources = self.sources.iloc[ind]
+
     def get_lightcurves(self,radius=None):
         if radius is None:
             radius = self.aperture_radius
@@ -383,7 +390,8 @@ class periodogram_detection():
 
         
     def plot_object(self,index=None,savepath=None,cut_rad=3,power_scale='linear'):
-        
+        if self.lcs is None:
+            self.make_lcs()
         #for i in range(len(self.phase)):
         cut_rad = 3
         if index is None:
@@ -465,6 +473,13 @@ class periodogram_detection():
 
     #def save_lightcurves(self)
 
+    def make_lcs(self):
+        print('making light curve')
+        self.get_lightcurves()
+        self.phase_fold()
+        self.bin_phase()
+
+
     def run(self):
         self.clean_data()
         print('making cube')
@@ -476,10 +491,7 @@ class periodogram_detection():
         self.find_freq_sources()
         print('cleaning detections')
         self.detection_cleaning()
-        print('making light curve')
-        self.get_lightcurves()
-        self.phase_fold()
-        self.bin_phase()
+        
 
 
 
