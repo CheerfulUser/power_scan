@@ -220,7 +220,6 @@ class periodogram_detection():
         power = np.zeros((len(freq),self.data.shape[1],self.data.shape[2]))
         for i in range(len(dy)-1):
             for j in range(len(dx)-1):
-                print('block')
                 cut = self.data[:,dy[i]:dy[i+1],dx[j]:dx[j+1]]
                 shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
                 batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
@@ -333,23 +332,42 @@ class periodogram_detection():
             ind = xind & yind
             self.sources = self.sources.iloc[ind]
 
+
+    def _make_lc(self,source,radius):
+        x = source.xcentroid
+        y = source.ycentroid
+        t,lc = Generate_LC(time=self.time,flux=self.data,x=x,y=y,radius=radius)
+        lc = np.array([t,lc])
+        freq,l = Generate_LC(time=self.freq,flux=self.power_norm,x=x,y=y,radius=radius)
+        if np.nansum(abs(l)) > 0:
+            good = True
+        else:
+            good = False
+        source_power = np.array([freq,l])
+        return lc, source_power, good
+
     def get_lightcurves(self,radius=None):
         if radius is None:
             radius = self.aperture_radius
 
-        lcs = []
-        source_power = []
-        good = []
-        for i in range(len(self.sources)):
-            source = self.sources.iloc[i]
-            x = source.xcentroid
-            y = source.ycentroid
-            t,l = Generate_LC(time=self.time,flux=self.data,x=x,y=y,radius=radius)
-            lcs += [np.array([t,l])]
-            t,l = Generate_LC(time=self.freq,flux=self.power_norm,x=x,y=y,radius=radius)
-            if np.nansum(abs(l)) > 0:
-                good += [i]
-            source_power += [np.array([t,l])]
+        # lcs = []
+        # source_power = []
+        # good = []
+        # for i in range(len(self.sources)):
+        #     source = self.sources.iloc[i]
+        #     x = source.xcentroid
+        #     y = source.ycentroid
+        #     t,l = Generate_LC(time=self.time,flux=self.data,x=x,y=y,radius=radius)
+        #     lcs += [np.array([t,l])]
+        #     t,l = Generate_LC(time=self.freq,flux=self.power_norm,x=x,y=y,radius=radius)
+        #     if np.nansum(abs(l)) > 0:
+        #         good += [i]
+        #     source_power += [np.array([t,l])]
+        index = np.arange(0,len(self.sources))
+        lcs,source_power,good = zip(*Parallel(n_jobs=self.cpu)(delayed(self._make_lc)(self.sources.iloc[i],radius) for i in index))
+        self.lcs = np.array(lcs)
+        self.source_power = np.array(source_power)
+        good = np.array(good)
         self.sources = self.sources.iloc[good]
         self.lcs = np.array(lcs)[good]
         self.source_power = np.array(source_power)[good]
