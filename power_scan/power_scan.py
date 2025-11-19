@@ -212,8 +212,9 @@ class periodogram_detection():
         dx = np.arange(0,self.data.shape[2]+self.block_size,self.block_size)
         dy = np.arange(0,self.data.shape[1]+self.block_size,self.block_size)
         power_blocks = []
-        temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0])
-                                               #fmin=1/self._period_low,fmax=1/self._period_high)
+
+        temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0],
+                                               fmin=(1/self._period_high),fmax=(1/self._period_low))
         freq = temp.freq()
         power = np.zeros((len(freq),self.data.shape[1],self.data.shape[2]))
         for i in range(len(dy)-1):
@@ -221,8 +222,8 @@ class periodogram_detection():
                 print('block')
                 cut = self.data[:,dy[i]:dy[i+1],dx[i]:dx[i+1]]
                 shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
-                batched = nifty_ls.lombscargle(self.time-self.time[0],shaped)
-                                               #fmin=1/self._period_low,fmax=1/self._period_high)
+                batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
+                                               fmin=1/self._period_high,fmax=1/self._period_low)
                 power_block = batched.power.T.reshape(batched.power.shape[1],cut.shape[1],cut.shape[2])
                 power[:,dy[i]:dy[i+1],dx[i]:dx[i+1]] = power_block
         
@@ -246,7 +247,7 @@ class periodogram_detection():
         
         shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
         batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
-                                       fmin=1/self._period_low,fmax=1/self._period_high)
+                                       fmin=1/self._period_high,fmax=1/self._period_low)
         self.power = batched.power.T.reshape(batched.power.shape[1],self.data.shape[1],self.data.shape[2])
         self.freq = batched.freq()
         m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
@@ -254,7 +255,7 @@ class periodogram_detection():
         
         # if self._period_low is None:
         #     self._set_period_lim()
-        # ind = (self.freq < 1/self._period_low) & (self.freq > 1/self._period_high)
+        ind = (self.freq < 1/self._period_low) & (self.freq > 1/self._period_high)
         self.power = self.power[ind]
         self.freq = self.freq[ind]
         self.period = 1/self.freq
@@ -466,13 +467,16 @@ class periodogram_detection():
 
     def run(self):
         self.clean_data()
+        print('making cube')
         if self.block_size is None:
             self.batch_make_freq_cube()
         else:
             self.block_make_freq_cube()
-
+        print('finding sources')
         self.find_freq_sources()
+        print('cleaning detections')
         self.detection_cleaning()
+        print('making light curve')
         self.get_lightcurves()
         self.phase_fold()
         self.bin_phase()
