@@ -109,7 +109,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
                  snr_lim=5,fwhm=3,dao_peak=50,cpu=-1,snr_search_lim=10,
-                 period_lim='auto',savepath=None,run=True):
+                 period_lim='auto',block_size=None,savepath=None,run=True):
         """
         Detect faint variable objects in time-series image data.
 
@@ -164,6 +164,7 @@ class periodogram_detection():
         self.snr_search_lim = snr_search_lim
         self.period_lim = period_lim
         self.savepath = savepath
+        self.block_size = block_size
 
         # calculated
         self.freq = None
@@ -204,17 +205,56 @@ class periodogram_detection():
                 raise ValueError(m)
         
 
+    def block_make_freq_cube(self):
+        if self._period_low is None:
+            self._set_period_lim()
+
+        dx = np.arange(0,self.data.shape[2]+self.block_size,self.block_size)
+        dy = np.arange(0,self.data.shape[1]+self.block_size,self.block_size)
+        power_blocks = []
+        temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0])
+                                               #fmin=1/self._period_low,fmax=1/self._period_high)
+        freq = temp.freq()
+        power = np.zeros((len(freq),self.data.shape[1],self.data.shape[2]))
+        for i in range(len(dy)-1):
+            for j in range(len(dx)-1):
+                print('block')
+                cut = self.data[:,dy[i]:dy[i+1],dx[i]:dx[i+1]]
+                shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
+                batched = nifty_ls.lombscargle(self.time-self.time[0],shaped)
+                                               #fmin=1/self._period_low,fmax=1/self._period_high)
+                power_block = batched.power.T.reshape(batched.power.shape[1],cut.shape[1],cut.shape[2])
+                power[:,dy[i]:dy[i+1],dx[i]:dx[i+1]] = power_block
+        
+        self.power = power
+        self.freq = freq
+        m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
+        self.power_norm = (self.power-med[:,np.newaxis,np.newaxis]) / std[:,np.newaxis,np.newaxis]
+        
+        # if self._period_low is None:
+        #     self._set_period_lim()
+        ind = (self.freq < 1/self._period_low) & (self.freq > 1/self._period_high)
+        self.power = self.power[ind]
+        self.freq = self.freq[ind]
+        self.period = 1/self.freq
+        self.power_norm = self.power_norm[ind]
+
+
     def batch_make_freq_cube(self):
+        if self._period_low is None:
+            self._set_period_lim()
+        
         shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
-        batched = nifty_ls.lombscargle(self.time-self.time[0],shaped)
+        batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
+                                       fmin=1/self._period_low,fmax=1/self._period_high)
         self.power = batched.power.T.reshape(batched.power.shape[1],self.data.shape[1],self.data.shape[2])
         self.freq = batched.freq()
         m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
         self.power_norm = (self.power-med[:,np.newaxis,np.newaxis]) / std[:,np.newaxis,np.newaxis]
         
-        if self._period_low is None:
-            self._set_period_lim()
-        ind = (self.freq < 1/self._period_low) & (self.freq > 1/self._period_high)
+        # if self._period_low is None:
+        #     self._set_period_lim()
+        # ind = (self.freq < 1/self._period_low) & (self.freq > 1/self._period_high)
         self.power = self.power[ind]
         self.freq = self.freq[ind]
         self.period = 1/self.freq
@@ -426,7 +466,11 @@ class periodogram_detection():
 
     def run(self):
         self.clean_data()
-        self.batch_make_freq_cube()
+        if self.block_size is None:
+            self.batch_make_freq_cube()
+        else:
+            self.block_make_freq_cube()
+
         self.find_freq_sources()
         self.detection_cleaning()
         self.get_lightcurves()
