@@ -221,12 +221,12 @@ class periodogram_detection():
         for i in range(len(dy)-1):
             for j in range(len(dx)-1):
                 print('block')
-                cut = self.data[:,dy[i]:dy[i+1],dx[i]:dx[i+1]]
+                cut = self.data[:,dy[i]:dy[i+1],dx[j]:dx[j+1]]
                 shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
                 batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
                                                fmin=1/self._period_high,fmax=1/self._period_low)
                 power_block = batched.power.T.reshape(batched.power.shape[1],cut.shape[1],cut.shape[2])
-                power[:,dy[i]:dy[i+1],dx[i]:dx[i+1]] = power_block
+                power[:,dy[i]:dy[i+1],dx[j]:dx[j+1]] = power_block
         
         self.power = power
         self.freq = freq
