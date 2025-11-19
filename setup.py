@@ -24,7 +24,7 @@ VERSION = version
 
 # What packages are required for this module to be executed?
 REQUIRED = ['numpy<2.0.0',           
-            'photutils>=1.4',
+            'photutils>=2.2',
             'pandas',
             'scipy!=1.4.0,!=1.4.1,>=0.19.0',
             'astropy',
