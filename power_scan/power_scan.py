@@ -13,7 +13,7 @@ from copy import deepcopy
 
 # warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
-def _detect_sources(frequency,power,peak=50,fwhm=3):
+def _detect_sources(frequency,power,index=None,peak=50,fwhm=3):
     import warnings
     from photutils.utils import NoDetectionsWarning
 
@@ -25,7 +25,8 @@ def _detect_sources(frequency,power,peak=50,fwhm=3):
     if s is not None:
         s = s.to_pandas()
         s['freq'] = frequency
-        # s['ind'] = i
+        if index is not None:
+            s['power_ind'] = index
         return s 
     else:
         return None
@@ -228,7 +229,7 @@ class periodogram_detection():
             peak = self.dao_peak
         ind = np.nanmax(self.power_norm,axis=(1,2)) >= self.snr_search_lim
         index = np.arange(0,len(self.freq))[ind]
-        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],self.power_norm[i],peak,fwhm) for i in index)
+        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],self.power_norm[i],i,peak,fwhm) for i in index)
         sources = None
         if len(source) > 0:
             for s in source:
