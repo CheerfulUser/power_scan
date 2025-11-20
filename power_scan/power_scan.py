@@ -417,7 +417,10 @@ class periodogram_detection():
         else:
             if type(index) == int:
                 index = [index]
+        
         for i in index:
+            print('binned shape ',self.binned.shape)
+            print('binned entry shape ',self.binned[i].shape)
             up = np.nanmax(self.binned[i][1]) + 0.5 * np.nanmax(abs(self.binned[i][1]))
             down = np.nanmin(self.binned[i][1]) - 0.5 * np.nanmax(abs(self.binned[i][1]))
             fig,ax = plt.subplot_mosaic('''AAII
@@ -497,7 +500,7 @@ class periodogram_detection():
         self.phase_fold()
         self.bin_phase()
         print('lcs',self.lcs.shape)
-        print('lcs',self.binned.shape)
+        print('binned',self.binned.shape)
 
 
     def run(self):
