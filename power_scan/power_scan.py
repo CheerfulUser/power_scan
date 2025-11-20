@@ -413,12 +413,13 @@ class periodogram_detection():
         #for i in range(len(self.phase)):
         cut_rad = 3
         if index is None:
-            index = np.arange(0,len(self.phase))
+            index = np.arange(0,len(self.sources))
         else:
             if type(index) == int:
                 index = [index]
-        
+        print('index ',index)
         for i in index:
+            print('ind ',i)
             print('binned shape ',self.binned.shape)
             print('binned entry shape ',self.binned[i].shape)
             up = np.nanmax(self.binned[i][1]) + 0.5 * np.nanmax(abs(self.binned[i][1]))
