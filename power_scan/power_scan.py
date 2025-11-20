@@ -304,7 +304,6 @@ class periodogram_detection():
                         adding = pd.DataFrame([group.loc[ind]]) # pandas is trash
                         keep = pd.concat([keep,adding], ignore_index=True)
                         if plot:
-                            print(group.objid.values)
                             self.plot_object(index=group.objid.values-1)
                     else:
                         keep = pd.concat([keep,group.loc[u]], ignore_index=True)
@@ -417,11 +416,7 @@ class periodogram_detection():
         else:
             if type(index) == int:
                 index = [index]
-        print('index ',index)
         for i in index:
-            print('ind ',i)
-            print('binned shape ',self.binned.shape)
-            print('binned entry shape ',self.binned[i].shape)
             up = np.nanmax(self.binned[i][1]) + 0.5 * np.nanmax(abs(self.binned[i][1]))
             down = np.nanmin(self.binned[i][1]) - 0.5 * np.nanmax(abs(self.binned[i][1]))
             fig,ax = plt.subplot_mosaic('''AAII
@@ -500,8 +495,6 @@ class periodogram_detection():
         self.get_lightcurves()
         self.phase_fold()
         self.bin_phase()
-        print('lcs',self.lcs.shape)
-        print('binned',self.binned.shape)
 
 
     def run(self):
