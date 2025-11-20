@@ -496,6 +496,8 @@ class periodogram_detection():
         self.get_lightcurves()
         self.phase_fold()
         self.bin_phase()
+        print('lcs',self.lcs.shape)
+        print('lcs',self.binned.shape)
 
 
     def run(self):
