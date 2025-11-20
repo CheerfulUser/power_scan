@@ -454,7 +454,7 @@ class periodogram_detection():
 
 
             ind = self.freq == self.sources['freq'].iloc[i]
-            gind = np.where(ind)[0][0]
+            gind = int(self.sources.power_ind.iloc[i])
             im = self.power_norm[gind]
             x = self.sources.xcentroid.iloc[i]
             y = self.sources.ycentroid.iloc[i]
