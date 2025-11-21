@@ -154,7 +154,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
                  snr_lim=5,fwhm=3,dao_peak=20,cpu=-1,snr_search_lim=10,
-                 period_lim='auto',block_size=None,edge_buffer=0,detection_method='dao',
+                 period_lim='auto',block_size=None,edge_buffer=0,detection_method='sep',
                  local_threshold=10,savepath=None,run=True):
         """
         Detect faint variable objects in time-series image data.
