@@ -8,31 +8,76 @@ import nifty_ls
 from joblib import Parallel, delayed 
 import matplotlib.pyplot as plt
 from copy import deepcopy
+import sep
 # import warnings
 # from photutils.utils import NoDetectionsWarning
 
 # warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
-def _detect_sources(frequency,power,index=None,peak=50,fwhm=3):
+
+def _local_sig(source,image,threshold=10,sky_in=5,sky_out=10):
+    from photutils.aperture import RectangularAnnulus, ApertureStats
+    good = []
+    source['local_sig'] = 0.0
+    for i in range(len(source)):
+        x = source.xcentroid.iloc[i]
+        y = source.ycentroid.iloc[i]
+        xint = int(np.round(x,0))
+        yint = int(np.round(y,0))
+        
+        annulus_aperture = RectangularAnnulus([xint,yint], w_in=5, w_out=10,h_out=10)
+
+        aperstats_sky = ApertureStats(image, annulus_aperture)
+        
+        sig = (source.flux.iloc[i]-aperstats_sky.mean) / (source.npix.iloc[i]*aperstats_sky.std)
+        source.loc[i,'local_sig'] = sig
+        if sig >= threshold:
+            good += [i]
+    source = source.iloc[good]
+    return source
+
+
+
+def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
+                    local_threshold=10,sep_wh_ratio=0.5):
     import warnings
     from photutils.utils import NoDetectionsWarning
 
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
-    finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
-    sources = None
-    #m,med,std = sigma_clipped_stats(power)
-    s = finder.find_stars(power)#(power - med)/std)
-    if s is not None:
-        s = s.to_pandas()
-        s['freq'] = frequency
-        if index is not None:
-            s['power_ind'] = index
-        return s 
+    if method.lower() == 'dao':
+        finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
+        s = finder.find_stars(power)
+        if s is not None:
+            s = s.to_pandas()
+    elif method.lower() == 'sep':
+        bkg = sep.Background(power)
+        objects = sep.extract(power, peak)#, err=bkg.globalrms)
+        objects = pd.DataFrame(objects)
+        w = objects['a'].values
+        h = objects['b'].values
+        f = objects['flux'].values
+        ratio = np.round(abs(w/h - 1),1)
+        ind = (ratio < sep_wh_ratio)
+        s = objects.iloc[ind]
+        s = s.rename(columns={'x':'xcentroid','y':'ycentroid'})
+        s['id'] = np.arange(1,len(s)+1)
+
+    else:
+        raise ValueError('method must either be sep or dao.')
+    if (s is not None):
+        s = _local_sig(s,power,local_threshold)
+        if (len(s) > 0):
+            s['freq'] = frequency
+            if index is not None:
+                s['power_ind'] = int(index)
+            return s 
+        else:
+            return None
     else:
         return None
 
 
-def _Spatial_group(result,min_samples=1,distance=0.5,njobs=-1,write_col='objid'):
+def _Spatial_group(result,min_samples=1,distance=1,njobs=-1,write_col='objid'):
     """
     Groups events based on proximity.
     """
@@ -53,7 +98,7 @@ def compress_freq_groups(result):
     for i in result['objid'].unique():
         obj_ind = result['objid'].values==i
         obj = result.iloc[obj_ind]
-        ind = np.argmax(obj['flux'].values)
+        ind = np.argmax(obj['local_sig'].values)
         inds += [np.where(obj_ind)[0][ind]]
     inds = np.array(inds)
     final = result.iloc[inds]
@@ -82,7 +127,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 
     if method.lower() == 'aperture':
         aperture = CircularAperture([x, y], radius)
-        annulus_aperture = RectangularAnnulus(pos, w_in=5, w_out=20,h_out=20)
+        annulus_aperture = RectangularAnnulus([x,y], w_in=5, w_out=20,h_out=20)
         flux = []
         flux_err = []
         for i in range(len(f)):
@@ -108,8 +153,9 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 
 class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
-                 snr_lim=5,fwhm=3,dao_peak=50,cpu=-1,snr_search_lim=10,
-                 period_lim='auto',block_size=None,edge_buffer=0,savepath=None,run=True):
+                 snr_lim=5,fwhm=3,dao_peak=20,cpu=-1,snr_search_lim=10,
+                 period_lim='auto',block_size=None,edge_buffer=0,detection_method='dao',
+                 local_threshold=10,savepath=None,run=True):
         """
         Detect faint variable objects in time-series image data.
 
@@ -166,6 +212,8 @@ class periodogram_detection():
         self.savepath = savepath
         self.block_size = block_size
         self.edge_buffer = edge_buffer
+        self.detection_method = detection_method
+        self.local_threshold = local_threshold
 
         # calculated
         self.freq = None
@@ -270,7 +318,7 @@ class periodogram_detection():
             peak = self.dao_peak
         ind = np.nanmax(self.power_norm,axis=(1,2)) >= self.snr_search_lim
         index = np.arange(0,len(self.freq))[ind]
-        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],self.power_norm[i],i,peak,fwhm) for i in index)
+        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],self.power_norm[i],i,peak,fwhm,self.detection_method,self.local_threshold) for i in index)
         sources = None
         if len(source) > 0:
             for s in source:
