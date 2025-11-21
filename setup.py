@@ -29,7 +29,8 @@ REQUIRED = ['numpy<2.0.0',
             'scipy!=1.4.0,!=1.4.1,>=0.19.0',
             'astropy',
             'joblib',
-            'nifty_ls']
+            'nifty_ls',
+            'sep']
 
 # What packages are optional?
 EXTRAS = {
