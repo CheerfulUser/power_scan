@@ -42,8 +42,9 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
                     local_threshold=10,sep_wh_ratio=0.5):
     import warnings
     from photutils.utils import NoDetectionsWarning
-
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
+
+    power = power.astype(float)
     if method.lower() == 'dao':
         finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
         s = finder.find_stars(power)
