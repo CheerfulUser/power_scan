@@ -43,16 +43,15 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
     import warnings
     from photutils.utils import NoDetectionsWarning
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
-
-    power = power.astype(float)
+    p = deepcopy(power).astype(float)
     if method.lower() == 'dao':
         finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
-        s = finder.find_stars(power)
+        s = finder.find_stars(p)
         if s is not None:
             s = s.to_pandas()
     elif method.lower() == 'sep':
-        bkg = sep.Background(power)
-        objects = sep.extract(power, peak)#, err=bkg.globalrms)
+        bkg = sep.Background(p)
+        objects = sep.extract(p, peak)#, err=bkg.globalrms)
         objects = pd.DataFrame(objects)
         w = objects['a'].values
         h = objects['b'].values
