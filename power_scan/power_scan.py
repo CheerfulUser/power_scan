@@ -386,12 +386,15 @@ class periodogram_detection():
         t,lc = Generate_LC(time=self.time,flux=self.data,x=x,y=y,radius=radius)
         lc = np.array([t,lc])
         freq,l = Generate_LC(time=self.freq,flux=self.power_norm,x=x,y=y,radius=radius)
+        source_power_norm = np.array([freq,l])
+        freq,l = Generate_LC(time=self.freq,flux=self.power,x=x,y=y,radius=radius)
+        source_power = np.array([freq,l])
         if np.nansum(abs(l)) > 0:
             good = True
         else:
             good = False
-        source_power = np.array([freq,l])
-        return lc, source_power, good
+        
+        return lc, source_power_norm,source_power, good
 
     def get_lightcurves(self,radius=None):
         if radius is None:
@@ -411,13 +414,15 @@ class periodogram_detection():
         #         good += [i]
         #     source_power += [np.array([t,l])]
         index = np.arange(0,len(self.sources))
-        lcs,source_power,good = zip(*Parallel(n_jobs=self.cpu)(delayed(self._make_lc)(self.sources.iloc[i],radius) for i in index))
+        lcs,source_power_norm,source_power,good = zip(*Parallel(n_jobs=self.cpu)(delayed(self._make_lc)(self.sources.iloc[i],radius) for i in index))
         self.lcs = np.array(lcs)
         self.source_power = np.array(source_power)
+        self.source_power_norm = np.array(source_power_norm)
         good = np.array(good)
         self.sources = self.sources.iloc[good]
         self.lcs = np.array(lcs)[good]
         self.source_power = np.array(source_power)[good]
+        self.source_power_norm = np.array(source_power_norm)[good]
         
 
 
@@ -454,7 +459,7 @@ class periodogram_detection():
 
 
         
-    def plot_object(self,index=None,savepath=None,cut_rad=3,power_scale='linear'):
+    def plot_object(self,index=None,savepath=None,cut_rad=3,power_scale='linear',power_plot='snr'):
         if self.lcs is None:
             self.make_lcs()
         #for i in range(len(self.phase)):
@@ -486,13 +491,24 @@ class periodogram_detection():
             ax['B'].set_ylabel('Counts')
             ax['B'].set_ylim(down,up)
 
-            ax['C'].set_title('"SNR" Power spectrum')
-            ax['C'].semilogx(1/self.source_power[i][0],self.source_power[i][1],'-')
+            ax['C'].set_title('Power spectrum')
+            if power_plot.lower() == 'snr':
+                ax['C'].semilogx(1/self.source_power_norm[i][0],self.source_power_norm[i][1],'-',label='SNR')
+            elif power_plot.lower() == 'power':
+                ax['C'].semilogx(1/self.source_power[i][0],self.source_power[i][1],'-',label='Power')
+            elif power_plot.lower() == 'both':
+                ax['C'].semilogx(1/self.source_power[i][0],self.source_power[i][1],'-',label='Power')
+                ax['C'].semilogx(1/self.source_power_norm[i][0],self.source_power_norm[i][1],'-',label='SNR')
+            else:
+                raise ValueError('Only valid options for power_plots: snr, power, both')
             if power_scale.lower() == 'log':
                 ax['C'].set_yscale('log')
             ax['C'].axvline(1/self.sources['freq'].iloc[i],color='k',ls=':')
             ax['C'].set_xlabel('Period (days)')
-            ax['C'].set_ylabel('"SNR" power')
+            #ax['C'].set_ylabel('"SNR" power')
+            ax['C'].set_ylabel('Power')
+            ax['C'].legend()
+
 
 
 
