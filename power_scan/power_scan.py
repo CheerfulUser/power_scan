@@ -43,7 +43,7 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
     import warnings
     from photutils.utils import NoDetectionsWarning
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
-    p = deepcopy(power).astype(float)
+    p = power.astype(float)
     if method.lower() == 'dao':
         finder = DAOStarFinder(peak,fwhm,exclude_border=True,min_separation=3)
         s = finder.find_stars(p)
@@ -318,7 +318,7 @@ class periodogram_detection():
             peak = self.dao_peak
         ind = np.nanmax(self.power_norm,axis=(1,2)) >= self.snr_search_lim
         index = np.arange(0,len(self.freq))[ind]
-        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],self.power_norm[i],i,peak,fwhm,self.detection_method,self.local_threshold) for i in index)
+        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],deepcopy(self.power_norm[i]),i,peak,fwhm,self.detection_method,self.local_threshold) for i in index)
         sources = None
         if len(source) > 0:
             for s in source:
