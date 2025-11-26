@@ -224,6 +224,8 @@ class periodogram_detection():
         self.phase = None
         self._period_low = None
         self._period_high = None
+        self.source_power = None
+        self.source_power_norm = None
 
         if run:
             self.run()
@@ -423,6 +425,7 @@ class periodogram_detection():
         self.lcs = np.array(lcs)[good]
         self.source_power = np.array(source_power)[good]
         self.source_power_norm = np.array(source_power_norm)[good]
+        self.med_power = np.nanmedian(self.power,axis=(1,2))
         
 
 
@@ -457,10 +460,52 @@ class periodogram_detection():
         binned = np.array(binned)
         self.binned = binned
 
+    def find_peak_power(self):
+        from scipy.signal import find_peaks
+        self.sources['power'] = np.nan
+        if self.source_power is None:
+            self.get_lightcurves()
+        for i in range(len(self.lcs)):
+            power = self.source_power[i,1] 
+            power_norm = self.source_power_norm[i,1] 
+            peaks, _ = find_peaks(power_norm, height=np.max(power_norm)*0.5)
+            p_ind = peaks[np.argmax(power[peaks])]
+
+            self.sources.loc[i,'power_ind'] = p_ind
+            self.sources.loc[i,'freq'] = self.freq[p_ind]
+            self.sources.loc[i,'power'] = power[p_ind]
+
+    def find_fundamental(self):
+        if self.lcs is None:
+            self.make_lcs()
+        for j in range(len(self.lcs)):
+            alias = np.array([1/4,1/2,1,2,4])
+            grad_sum = []
+            for i in range(len(alias)):
+                freq = self.sources['freq'].iloc[j]
+                lc = self.lcs[j]
+                phase = lc[0] - lc[0,0]
+                phase = ((lc[0] - lc[0,0]) / (1/(freq*alias[i]))) % 1
+                new_period = 1/(freq*alias[i])
+                p = lc[1,np.argsort(phase)]
+                metric = np.sum(abs(np.diff(p)))
+                if new_period > (lc[0,-1]-lc[0,0])/1.5:
+                    metric = 1e6
+                grad_sum += [metric]
+            grad_sum = np.array(grad_sum)
+            ind = np.argmin(grad_sum)
+            self.sources.loc[j,'freq'] = freq * alias[ind]
+        self.sources['period'] = 1/self.sources['freq'].values
+        self.phase_fold()
+        self.bin_phase()
+
+    
+
+        
 
         
     def plot_object(self,index=None,savepath=None,cut_rad=3,power_scale='linear',power_plot='snr'):
-        if self.lcs is None:
+        if self.phase is None:
             self.make_lcs()
         #for i in range(len(self.phase)):
         cut_rad = 3
@@ -572,6 +617,10 @@ class periodogram_detection():
         self.find_freq_sources()
         print('cleaning detections')
         self.detection_cleaning()
+        print('finding peak frequency')
+        self.find_peak_power()
+        print('finding fundamental period')
+        self.find_fundamental()
         
 
 
