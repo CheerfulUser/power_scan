@@ -500,8 +500,16 @@ class periodogram_detection():
                 if new_ind < len(self.source_power[j,1]):
                     new_power = self.source_power[j,1,new_ind]
                     ratio = new_power / self.sources['power'].iloc[j]
-                    if ratio < 0.2:
+                    # print('var: ',j)
+                    # print('Power ratio: ',ratio)
+                    new_power = self.source_power_norm[j,1,new_ind]
+                    old_power = self.source_power_norm[j,1,self.sources['power_ind'].iloc[j]]
+                    ratio_n = new_power / old_power
+                    # print('Norm power ratio: ',ratio_n)
+                    if (ratio < 0.2) & (ratio_n < 0.2):
                         ind = 1
+                    # else:
+                    #     print('changed')
                 else:
                     ind = 1
 
