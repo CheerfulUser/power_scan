@@ -246,7 +246,7 @@ class periodogram_detection():
     def _set_period_lim(self):
         if self.period_lim == 'auto':
             self._period_low = np.median(np.diff(self.time)) * 2 
-            self._period_high = (self.time[-1] - self.time[0]) / 2 
+            self._period_high = (self.time[-1] - self.time[0]) / 1.5 
         else:
             try:
                 self._period_low = np.min(self.period_lim)
@@ -479,11 +479,11 @@ class periodogram_detection():
         if self.lcs is None:
             self.make_lcs()
         for j in range(len(self.lcs)):
-            alias = np.array([1/4,1/2,1,2,4])
+            freq = self.sources['freq'].iloc[j]
+            lc = self.lcs[j]
+            alias = np.array([1/2,1,2])
             grad_sum = []
             for i in range(len(alias)):
-                freq = self.sources['freq'].iloc[j]
-                lc = self.lcs[j]
                 phase = lc[0] - lc[0,0]
                 phase = ((lc[0] - lc[0,0]) / (1/(freq*alias[i]))) % 1
                 new_period = 1/(freq*alias[i])
@@ -494,6 +494,18 @@ class periodogram_detection():
                 grad_sum += [metric]
             grad_sum = np.array(grad_sum)
             ind = np.argmin(grad_sum)
+            if ind != 1:
+                m = abs(self.freq - freq * alias[ind])
+                new_ind = np.argmin(m)
+                if new_ind < len(self.source_power[j,1]):
+                    new_power = self.source_power[j,1,new_ind]
+                    ratio = new_power / self.sources['power'].iloc[j]
+                    if ratio < 0.2:
+                        ind = 1
+                else:
+                    ind = 1
+
+
             self.sources.loc[j,'freq'] = freq * alias[ind]
         self.sources['period'] = 1/self.sources['freq'].values
         self.phase_fold()
