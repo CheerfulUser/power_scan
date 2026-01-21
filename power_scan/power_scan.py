@@ -149,6 +149,14 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 
         return t,f
 
+def run_reg_ls(lc):
+    t,f = lc
+    import nifty_ls
+    frequency, power = LombScargle(t, f, np.ones_like(f)).autopower(method="fastnifty",maximum_frequency=max_freq,
+                                                                    nyquist_factor=1.5,
+                                                                    samples_per_peak=5)
+    return [frequency, power]
+
 
 
 class periodogram_detection():
@@ -265,7 +273,7 @@ class periodogram_detection():
         power_blocks = []
 
         temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0],
-                                               fmin=(1/self._period_high),fmax=(1/self._period_low))
+                                               fmin=(1/self._period_high),fmax=(1/self._period_low),nterms=1)
         freq = temp.freq()
         power = np.zeros((len(freq),self.data.shape[1],self.data.shape[2]))
         for i in range(len(dy)-1):
@@ -273,7 +281,7 @@ class periodogram_detection():
                 cut = self.data[:,dy[i]:dy[i+1],dx[j]:dx[j+1]]
                 shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
                 batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
-                                               fmin=1/self._period_high,fmax=1/self._period_low)
+                                               fmin=1/self._period_high,fmax=1/self._period_low,nterms=1)
                 power_block = batched.power.T.reshape(batched.power.shape[1],cut.shape[1],cut.shape[2])
                 power[:,dy[i]:dy[i+1],dx[j]:dx[j+1]] = power_block
         
@@ -297,7 +305,7 @@ class periodogram_detection():
         
         shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
         batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
-                                       fmin=1/self._period_high,fmax=1/self._period_low)
+                                       fmin=1/self._period_high,fmax=1/self._period_low,nterms=1)
         self.power = batched.power.T.reshape(batched.power.shape[1],self.data.shape[1],self.data.shape[2])
         self.freq = batched.freq()
         m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
@@ -310,6 +318,16 @@ class periodogram_detection():
         self.freq = self.freq[ind]
         self.period = 1/self.freq
         self.power_norm = self.power_norm[ind]
+
+    def loky_make_freq_cube(self):
+        if self._period_low is None:
+            self._set_period_lim()
+
+        shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
+
+        results = Parallel(n_jobs=int(multiprocessing.cpu_count()),backend='loky')(delayed(run_reg_ls)(lc) for lc in shaped)
+
+
 
 
     def find_freq_sources(self,peak=None,fwhm=None):
@@ -370,16 +388,19 @@ class periodogram_detection():
         if snr_lim is None:
             snr_lim = self.snr_lim
         detect = self.detections
-        detect = detect.loc[detect['flux'] >= snr_lim]
-        sources = _Spatial_group(detect)
-        self.sources = compress_freq_groups(sources)
-        self._spatial_alias_clean()
+        if detect is not None:
+            detect = detect.loc[detect['flux'] >= snr_lim]
+            sources = _Spatial_group(detect)
+            self.sources = compress_freq_groups(sources)
+            self._spatial_alias_clean()
 
-        if self.edge_buffer > 0:
-            xind = (self.sources.xcentroid.values > self.edge_buffer) & (self.sources.xcentroid.values < self.data.shape[2] - self.edge_buffer)
-            yind = (self.sources.ycentroid.values > self.edge_buffer) & (self.sources.ycentroid.values < self.data.shape[1] - self.edge_buffer)
-            ind = xind & yind
-            self.sources = self.sources.iloc[ind]
+            if self.edge_buffer > 0:
+                xind = (self.sources.xcentroid.values > self.edge_buffer) & (self.sources.xcentroid.values < self.data.shape[2] - self.edge_buffer)
+                yind = (self.sources.ycentroid.values > self.edge_buffer) & (self.sources.ycentroid.values < self.data.shape[1] - self.edge_buffer)
+                ind = xind & yind
+                self.sources = self.sources.iloc[ind]
+        else:
+            self.sources = None
 
 
     def _make_lc(self,source,radius):
@@ -637,11 +658,15 @@ class periodogram_detection():
         self.find_freq_sources()
         print('cleaning detections')
         self.detection_cleaning()
-        print('finding peak frequency')
-        self.find_peak_power()
-        print('finding fundamental period')
-        self.find_fundamental()
-        
+        if self.sources is not None:
+            print('finding peak frequency')
+            self.find_peak_power()
+            print('finding fundamental period')
+            self.find_fundamental()
+        else:
+            print('No sources detected.')
+            return
+            
 
 
 
