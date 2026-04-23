@@ -1,6 +1,6 @@
 import numpy as np
 from astropy.timeseries import LombScargle
-from astropy.stats import sigma_clipped_stats
+from astropy.stats import sigma_clipped_stats, sigma_clip
 from scipy.signal import find_peaks
 from photutils.detection import DAOStarFinder
 import pandas as pd
@@ -17,6 +17,7 @@ import sep
 
 def _local_sig(source,image,threshold=10,sky_in=5,sky_out=10):
     from photutils.aperture import RectangularAnnulus, ApertureStats
+    source = source.reset_index(drop=True)
     good = []
     source['local_sig'] = 0.0
     for i in range(len(source)):
@@ -58,7 +59,7 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
         f = objects['flux'].values
         ratio = np.round(abs(w/h - 1),1)
         ind = (ratio < sep_wh_ratio)
-        s = objects.iloc[ind]
+        s = objects.loc[ind].reset_index(drop=True)
         s = s.rename(columns={'x':'xcentroid','y':'ycentroid'})
         s['id'] = np.arange(1,len(s)+1)
 
@@ -131,7 +132,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
         flux = []
         flux_err = []
         for i in range(len(f)):
-            m = sigma_clip(data,masked=True,sigma=5).mask
+            m = sigma_clip(f[i],masked=True,sigma=5).mask
             mask = fftconvolve(m, np.ones((3,3)), mode='same') > 0.5
             aperstats_sky = ApertureStats(f[i], annulus_aperture,mask = mask)
             phot_table = aperture_photometry(f[i], aperture)
@@ -149,7 +150,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
 
         return t,f
 
-def run_reg_ls(lc):
+def run_reg_ls(lc, max_freq=None):
     t,f = lc
     import nifty_ls
     frequency, power = LombScargle(t, f, np.ones_like(f)).autopower(method="fastnifty",maximum_frequency=max_freq,
@@ -218,6 +219,7 @@ class periodogram_detection():
         self.snr_search_lim = snr_search_lim
         self.period_lim = period_lim
         self.savepath = savepath
+        self.savename = None
         self.block_size = block_size
         self.edge_buffer = edge_buffer
         self.detection_method = detection_method
@@ -252,8 +254,9 @@ class periodogram_detection():
         self.data = self.data[ind]
     
     def _set_period_lim(self):
-        if self.period_lim == 'auto':
+        if isinstance(self.period_lim, str) and self.period_lim == 'auto':
             self._period_low = np.median(np.diff(self.time)) * 2 
+            print(self.time.shape)
             self._period_high = (self.time[-1] - self.time[0]) / 1.5 
         else:
             try:
@@ -320,6 +323,7 @@ class periodogram_detection():
         self.power_norm = self.power_norm[ind]
 
     def loky_make_freq_cube(self):
+        import multiprocessing
         if self._period_low is None:
             self._set_period_lim()
 
@@ -442,7 +446,7 @@ class periodogram_detection():
         self.source_power = np.array(source_power)
         self.source_power_norm = np.array(source_power_norm)
         good = np.array(good)
-        self.sources = self.sources.iloc[good]
+        self.sources = self.sources.iloc[good].reset_index(drop=True)
         self.lcs = np.array(lcs)[good]
         self.source_power = np.array(source_power)[good]
         self.source_power_norm = np.array(source_power_norm)[good]
@@ -490,6 +494,7 @@ class periodogram_detection():
             power = self.source_power[i,1] 
             power_norm = self.source_power_norm[i,1] 
             peaks, _ = find_peaks(power_norm, height=np.max(power_norm)*0.5)
+
             p_ind = peaks[np.argmax(power[peaks])]
 
             self.sources.loc[i,'power_ind'] = p_ind
@@ -611,11 +616,21 @@ class periodogram_detection():
             yhigh = np.min([yind+cut_rad+1,im.shape[0]])
 
             im = im[ylow:yhigh,xlow:xhigh]
-            im = ax['I'].imshow(im,origin='lower')
+            vmin = np.percentile(im,16)
+            vmax = np.percentile(im,99)
+            im = ax['I'].imshow(im,origin='lower',vmin=vmin,vmax=vmax)
             fig.colorbar(im,ax=ax['I'])
 
             ax['I'].scatter(x-xlow,y-ylow,c='C1')
             ax['I'].set_title('Peak power')
+
+            locs = ax['I'].get_xticks()
+            new_labels = [f'{loc + xlow:.0f}' for loc in locs] 
+            #ax['I'].set_xticks(locs, labels=new_labels)
+
+            locs = ax['I'].get_yticks()
+            new_labels = [f'{loc + ylow:.0f}' for loc in locs] 
+            #ax['I'].set_yticks(locs, labels=new_labels)
 
 
             plt.tight_layout()
