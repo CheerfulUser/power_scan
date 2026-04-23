@@ -23,13 +23,15 @@ REQUIRES_PYTHON = '>=3.9.0'
 VERSION = version
 
 # What packages are required for this module to be executed?
-REQUIRED = ['numpy<2.0.0',           
-            'photutils',#>=2.2',
+REQUIRED = ['numpy<2.0.0',
+            'matplotlib',
+            'photutils',
             'pandas',
             'scipy!=1.4.0,!=1.4.1,>=0.19.0',
             'astropy',
             'joblib',
             'nifty_ls',
+            'scikit-learn',
             'sep']
 
 # What packages are optional?
