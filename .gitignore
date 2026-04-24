@@ -6,7 +6,16 @@ __pycache__/
 # C extensions
 *.so
 
+#test data
+data/*
+
+#figures
+*.png
+*.pdf
+*.jpg
+
 # Distribution / packaging
+.DS_Store
 .Python
 build/
 develop-eggs/
