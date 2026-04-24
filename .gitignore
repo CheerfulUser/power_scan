@@ -9,6 +9,7 @@ __pycache__/
 #test data
 data/*
 *.csv
+*.npy
 
 #figures
 *.png
