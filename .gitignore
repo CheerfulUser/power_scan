@@ -15,6 +15,7 @@ data/*
 *.png
 *.pdf
 *.jpg
+*.gif
 
 # Distribution / packaging
 .DS_Store
