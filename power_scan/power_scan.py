@@ -40,7 +40,7 @@ def _local_sig(source,image,threshold=10,sky_in=5,sky_out=10):
 
 
 def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
-                    local_threshold=10,sep_wh_ratio=0.5):
+                    local_threshold=10,sep_wh_ratio=0.5,psf_kernel=None):
     import warnings
     from photutils.utils import NoDetectionsWarning
     warnings.filterwarnings("ignore", category=NoDetectionsWarning)
@@ -52,7 +52,10 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
             s = s.to_pandas()
     elif method.lower() == 'sep':
         bkg = sep.Background(p)
-        objects = sep.extract(p, peak)#, err=bkg.globalrms)
+        sep_kwargs = {}
+        if psf_kernel is not None:
+            sep_kwargs['filter_kernel'] = np.asarray(psf_kernel, dtype=np.float32)
+        objects = sep.extract(p, peak, **sep_kwargs)
         objects = pd.DataFrame(objects)
         w = objects['a'].values
         h = objects['b'].values
@@ -76,6 +79,148 @@ def _detect_sources(frequency,power,index=None,peak=50,fwhm=3,method='sep',
             return None
     else:
         return None
+
+
+def _refine_peak_freq(freqs, power_norm_1d, peak_idx, half_width=2):
+    """
+    Sub-bin peak refinement by fitting a Gaussian to the 5 points centred on
+    peak_idx in a 1-D power spectrum slice.
+
+    Returns (refined_freq, snap_idx) where refined_freq is the Gaussian centre
+    and snap_idx is the nearest grid index (used to keep power_ind consistent).
+    Falls back to (freqs[peak_idx], peak_idx) if the fit fails or there are
+    too few points.
+    """
+    from scipy.optimize import curve_fit
+
+    lo = max(0, peak_idx - half_width)
+    hi = min(len(freqs) - 1, peak_idx + half_width)
+    if hi - lo < 4:
+        return freqs[peak_idx], peak_idx
+
+    f = freqs[lo:hi + 1]
+    p = power_norm_1d[lo:hi + 1]
+
+    try:
+        popt, _ = curve_fit(
+            lambda x, A, f0, sig: A * np.exp(-0.5 * ((x - f0) / sig) ** 2),
+            f, p,
+            p0=[p.max(), freqs[peak_idx], (f[-1] - f[0]) / 4.0],
+            bounds=([0, f[0], 0], [np.inf, f[-1], f[-1] - f[0]]),
+        )
+        refined_freq = float(popt[1])
+        snap_idx     = int(np.argmin(np.abs(freqs - refined_freq)))
+        return refined_freq, snap_idx
+    except Exception:
+        return freqs[peak_idx], peak_idx
+
+
+def _odd_even_asymmetry(time, flux, freq, n_bins=20):
+    """
+    Odd-even half-cycle test for eclipsing binaries.
+
+    Folds the light curve at 2/freq (doubled period) and compares the shape
+    of the first half-cycle (phase 0-0.5) against the second (phase 0.5-1.0).
+    For an eclipsing binary the two halves contain different eclipses and are
+    asymmetric; for a sinusoidal variable or RR Lyrae the two halves are
+    mirror images with the same amplitude.
+
+    Returns the asymmetry score A = RMS(first_half - second_half) / amplitude,
+    where amplitude is the peak-to-peak range of the 2P-folded, binned curve.
+    A close to 0 means the two halves are identical (symmetric variable or too
+    few cycles to tell).  A > ~0.3 is a strong indicator that the true period
+    is 2× the supplied freq.
+
+    Returns NaN when there are too few observations per bin to be reliable.
+    """
+    phase = ((time - time[0]) * (freq / 2.0)) % 1.0
+
+    bins = np.linspace(0, 1, n_bins + 1)
+    half = n_bins // 2
+    first, second = [], []
+    for i in range(n_bins):
+        mask = (phase >= bins[i]) & (phase < bins[i + 1])
+        if mask.sum() < 2:
+            (first if i < half else second).append(np.nan)
+        else:
+            (first if i < half else second).append(np.median(flux[mask]))
+
+    first  = np.array(first)
+    second = np.array(second)
+
+    # Mean-centre each half independently so depth offsets don't dominate
+    first  -= np.nanmedian(first)
+    second -= np.nanmedian(second)
+
+    valid = np.isfinite(first) & np.isfinite(second)
+    if valid.sum() < max(3, half // 2):
+        return np.nan
+
+    full = np.concatenate([first, second])
+    amplitude = np.nanmax(full) - np.nanmin(full)
+    if amplitude == 0:
+        return 0.0
+
+    return float(np.sqrt(np.nanmean((first[valid] - second[valid]) ** 2)) / amplitude)
+
+
+def _phase_coherence(time, data, x, y, freq, radius=2.0):
+    """
+    Rayleigh R statistic for spatial phase coherence at position (x, y) and
+    frequency freq.  Fits a sinusoid phase independently at every pixel within
+    the aperture and returns the mean resultant vector length R ∈ [0, 1].
+    R ≈ 1 means all pixels oscillate in phase (genuine point source);
+    R ≈ 0 means phases are random (noise spike).
+    """
+    ny, nx = data.shape[1], data.shape[2]
+    xi, yi = int(round(x)), int(round(y))
+    r = int(np.ceil(radius))
+    t = time - time[0]
+    omega = 2 * np.pi * freq
+
+    phases = []
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if np.hypot(dx, dy) > radius:
+                continue
+            px, py = xi + dx, yi + dy
+            if 0 <= px < nx and 0 <= py < ny:
+                lc = data[:, py, px].astype(float)
+                lc -= lc.mean()
+                c = np.dot(lc, np.cos(omega * t))
+                s = np.dot(lc, np.sin(omega * t))
+                phases.append(np.arctan2(s, c))
+
+    if len(phases) < 2:
+        return np.nan
+    return float(np.abs(np.mean(np.exp(1j * np.array(phases)))))
+
+
+def _harmonic_power(freq, power_norm, freq_array, x, y, radius=1.5):
+    """
+    Return the mean normalised power at the first harmonic (2 * freq) within
+    a circular aperture of the given radius centred on (x, y).
+    Returns NaN when the harmonic falls outside the frequency grid.
+    """
+    h_freq = 2.0 * freq
+    if h_freq > freq_array.max() or h_freq < freq_array.min():
+        return np.nan
+
+    h_idx = int(np.argmin(np.abs(freq_array - h_freq)))
+    ny, nx = power_norm.shape[1], power_norm.shape[2]
+    xi, yi = int(round(x)), int(round(y))
+    r = int(np.ceil(radius))
+
+    vals = []
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if np.hypot(dx, dy) > radius:
+                continue
+            px, py = xi + dx, yi + dy
+            if 0 <= px < nx and 0 <= py < ny:
+                vals.append(power_norm[h_idx, py, px])
+
+    return float(np.mean(vals)) if vals else np.nan
 
 
 def _Spatial_group(result,min_samples=1,distance=1,njobs=-1,write_col='objid'):
@@ -164,7 +309,10 @@ class periodogram_detection():
     def __init__(self,time,data,error=None,aperture_radius=1.5,
                  snr_lim=5,fwhm=3,dao_peak=20,cpu=-1,snr_search_lim=10,
                  period_lim='auto',block_size=None,edge_buffer=0,detection_method='sep',
-                 local_threshold=10,savepath=None,run=True):
+                 local_threshold=10,savepath=None,psf_kernel=None,
+                 phase_coherence_lim=None,period_max_frac=None,
+                 odd_even_asymmetry_lim=None,
+                 run=True):
         """
         Detect faint variable objects in time-series image data.
 
@@ -224,6 +372,10 @@ class periodogram_detection():
         self.edge_buffer = edge_buffer
         self.detection_method = detection_method
         self.local_threshold = local_threshold
+        self.psf_kernel = psf_kernel
+        self.phase_coherence_lim = phase_coherence_lim
+        self.period_max_frac = period_max_frac
+        self.odd_even_asymmetry_lim = odd_even_asymmetry_lim
 
         # calculated
         self.freq = None
@@ -342,7 +494,7 @@ class periodogram_detection():
             peak = self.dao_peak
         ind = np.nanmax(self.power_norm,axis=(1,2)) >= self.snr_search_lim
         index = np.arange(0,len(self.freq))[ind]
-        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],deepcopy(self.power_norm[i]),i,peak,fwhm,self.detection_method,self.local_threshold) for i in index)
+        source = Parallel(n_jobs=self.cpu)(delayed(_detect_sources)(self.freq[i],deepcopy(self.power_norm[i]),i,peak,fwhm,self.detection_method,self.local_threshold,psf_kernel=self.psf_kernel) for i in index)
         sources = None
         if len(source) > 0:
             for s in source:
@@ -394,6 +546,13 @@ class periodogram_detection():
         detect = self.detections
         if detect is not None:
             detect = detect.loc[detect['flux'] >= snr_lim]
+            # Pre-filter by period before grouping so junk long-period detections
+            # cannot out-compete real detections at the same spatial position.
+            if self.period_max_frac is not None and self._period_high is not None:
+                period_max = self._period_high * self.period_max_frac
+                period_ok = (1.0 / detect['freq'].values) <= period_max
+                if period_ok.any():
+                    detect = detect.loc[period_ok]
             sources = _Spatial_group(detect)
             self.sources = compress_freq_groups(sources)
             self._spatial_alias_clean()
@@ -494,6 +653,8 @@ class periodogram_detection():
             power = self.source_power[i,1] 
             power_norm = self.source_power_norm[i,1] 
             peaks, _ = find_peaks(power_norm, height=np.max(power_norm)*0.5)
+            if len(peaks) == 0:
+                peaks = np.array([int(np.argmax(power_norm))])
 
             p_ind = peaks[np.argmax(power[peaks])]
 
@@ -501,7 +662,49 @@ class periodogram_detection():
             self.sources.loc[i,'freq'] = self.freq[p_ind]
             self.sources.loc[i,'power'] = power[p_ind]
 
-    def find_fundamental(self):
+    def refine_centroids(self, half_width=4):
+        """
+        Re-centroid each source by fitting a 2D Gaussian to the power_norm slice
+        at the peak frequency.  Replaces the sep flux-weighted centroid, which can
+        be biased when a PSF filter kernel is used.
+        """
+        from scipy.optimize import curve_fit
+
+        def gaussian2d(xy, A, x0, y0, sx, sy, C):
+            x, y = xy
+            return (A * np.exp(-0.5 * ((x - x0) / sx) ** 2
+                               -0.5 * ((y - y0) / sy) ** 2) + C).ravel()
+
+        ny, nx = self.power_norm.shape[1], self.power_norm.shape[2]
+        for i in range(len(self.sources)):
+            x0 = self.sources['xcentroid'].iloc[i]
+            y0 = self.sources['ycentroid'].iloc[i]
+            p_ind = int(self.sources['power_ind'].iloc[i])
+            im = self.power_norm[p_ind]
+
+            xi, yi = int(round(x0)), int(round(y0))
+            xlo = max(0, xi - half_width)
+            xhi = min(nx, xi + half_width + 1)
+            ylo = max(0, yi - half_width)
+            yhi = min(ny, yi + half_width + 1)
+            cutout = im[ylo:yhi, xlo:xhi].astype(float)
+            if cutout.size < 9:
+                continue
+
+            yg, xg = np.mgrid[ylo:yhi, xlo:xhi].astype(float)
+            p0 = [cutout.max() - cutout.min(), x0, y0, 1.5, 1.5, cutout.min()]
+            bounds_lo = [0, xlo, ylo, 0.3, 0.3, -np.inf]
+            bounds_hi = [np.inf, xhi, yhi, half_width, half_width, np.inf]
+            try:
+                popt, _ = curve_fit(gaussian2d, (xg.ravel(), yg.ravel()),
+                                    cutout.ravel(), p0=p0,
+                                    bounds=(bounds_lo, bounds_hi), maxfev=2000)
+                self.sources.loc[i, 'xcentroid'] = float(popt[1])
+                self.sources.loc[i, 'ycentroid'] = float(popt[2])
+            except Exception:
+                pass
+
+    def find_fundamental(self, odd_even_threshold=0.3):
         if self.lcs is None:
             self.make_lcs()
         for j in range(len(self.lcs)):
@@ -526,21 +729,34 @@ class periodogram_detection():
                 if new_ind < len(self.source_power[j,1]):
                     new_power = self.source_power[j,1,new_ind]
                     ratio = new_power / self.sources['power'].iloc[j]
-                    # print('var: ',j)
-                    # print('Power ratio: ',ratio)
                     new_power = self.source_power_norm[j,1,new_ind]
                     old_power = self.source_power_norm[j,1,self.sources['power_ind'].iloc[j]]
                     ratio_n = new_power / old_power
-                    # print('Norm power ratio: ',ratio_n)
                     if (ratio < 0.2) & (ratio_n < 0.2):
                         ind = 1
-                    # else:
-                    #     print('changed')
                 else:
                     ind = 1
 
+            # Odd-even check: the total-variation metric always prefers a
+            # single-dip fold, so it will never spontaneously choose 2P for
+            # an eclipsing binary. If the period was kept (ind==1), test
+            # whether the 2P fold has asymmetric half-cycles — the hallmark
+            # of unequal primary and secondary eclipses.
+            if ind == 1:
+                doubled_period = 2.0 / freq
+                if self._period_high is not None and doubled_period <= self._period_high:
+                    asym = _odd_even_asymmetry(lc[0], lc[1], freq)
+                    if np.isfinite(asym) and asym > odd_even_threshold:
+                        ind = 2
 
-            self.sources.loc[j,'freq'] = freq * alias[ind]
+            # Snap to nearest grid point then refine with a 5-point Gaussian
+            # fit so the stored frequency lands on the true sub-bin peak.
+            snap_idx = int(np.argmin(np.abs(self.freq - freq * alias[ind])))
+            refined_freq, peak_idx = _refine_peak_freq(
+                self.freq, self.source_power_norm[j, 1], snap_idx)
+            self.sources.loc[j, 'freq']      = refined_freq
+            self.sources.loc[j, 'power_ind'] = peak_idx
+
         self.sources['period'] = 1/self.sources['freq'].values
         self.phase_fold()
         self.bin_phase()
@@ -550,6 +766,88 @@ class periodogram_detection():
         
 
         
+    def measure_phase_coherence(self, radius=None):
+        """
+        Compute the Rayleigh R phase-coherence statistic for every source.
+
+        Fits a sinusoid independently at each pixel within the aperture and
+        measures how tightly the inferred phases cluster.  A genuine point
+        source yields R close to 1; a noise spike in the power image yields
+        R close to 0 because adjacent pixels are not driven by the same signal.
+
+        Adds a 'phase_coherence' column (float, 0–1) to self.sources.
+        """
+        if radius is None:
+            radius = self.aperture_radius
+        if self.sources is None or len(self.sources) == 0:
+            return
+        r_vals = []
+        for i in range(len(self.sources)):
+            src = self.sources.iloc[i]
+            r = _phase_coherence(self.time, self.data,
+                                 float(src['xcentroid']), float(src['ycentroid']),
+                                 float(src['freq']), radius)
+            r_vals.append(r)
+        self.sources = self.sources.copy()
+        self.sources['phase_coherence'] = r_vals
+
+    def measure_harmonic_power(self, radius=None):
+        """
+        Measure the normalised power at the first harmonic (2f) for every source.
+
+        A real periodic source tends to have detectable power at harmonics of
+        the fundamental; an isolated noise spike in the power cube typically
+        does not.  The ratio harmonic_power / peak_power provides a
+        discriminator between true detections and chance fluctuations.
+
+        Adds 'harmonic_power' (mean SNR at 2f within the aperture) and
+        'harmonic_ratio' (harmonic_power / peak power_norm) to self.sources.
+        NaN is recorded when the harmonic lies outside the frequency grid.
+        """
+        if radius is None:
+            radius = self.aperture_radius
+        if self.sources is None or len(self.sources) == 0:
+            return
+        h_powers, h_ratios = [], []
+        for i in range(len(self.sources)):
+            src = self.sources.iloc[i]
+            peak_pn = float(self.power_norm[
+                int(src['power_ind']),
+                int(round(float(src['ycentroid']))),
+                int(round(float(src['xcentroid'])))
+            ])
+            hp = _harmonic_power(float(src['freq']), self.power_norm, self.freq,
+                                 float(src['xcentroid']), float(src['ycentroid']),
+                                 radius)
+            h_powers.append(hp)
+            ratio = (hp / peak_pn) if (np.isfinite(hp) and peak_pn > 0) else np.nan
+            h_ratios.append(ratio)
+        self.sources = self.sources.copy()
+        self.sources['harmonic_power'] = h_powers
+        self.sources['harmonic_ratio'] = h_ratios
+
+    def measure_odd_even_asymmetry(self, n_bins=20):
+        """
+        Apply the odd-even half-cycle test to all sources.
+
+        For each source, folds the light curve at twice the detected period and
+        measures whether the two half-cycles differ in shape.  A high asymmetry
+        score (> ~0.3) indicates the source is likely an eclipsing binary whose
+        true orbital period is 2× the currently stored period.
+
+        Adds 'odd_even_asymmetry' (float, 0–1) to self.sources.  NaN is
+        recorded when there are too few observations per phase bin.
+        """
+        if self.sources is None or len(self.sources) == 0:
+            return
+        scores = []
+        for i in range(len(self.sources)):
+            freq = float(self.sources['freq'].iloc[i])
+            t, f = self.lcs[i][0], self.lcs[i][1]
+            scores.append(_odd_even_asymmetry(t, f, freq, n_bins))
+        self.sources = self.sources.copy()
+        self.sources['odd_even_asymmetry'] = scores
+
     def plot_object(self,index=None,savepath=None,cut_rad=3,power_scale='linear',power_plot='snr'):
         if self.phase is None:
             self.make_lcs()
@@ -624,13 +922,14 @@ class periodogram_detection():
             ax['I'].scatter(x-xlow,y-ylow,c='C1')
             ax['I'].set_title('Peak power')
 
+            h, w = im.get_array().shape
             locs = ax['I'].get_xticks()
-            new_labels = [f'{loc + xlow:.0f}' for loc in locs] 
-            #ax['I'].set_xticks(locs, labels=new_labels)
+            locs = locs[(locs >= 0) & (locs < w)]
+            ax['I'].set_xticks(locs, labels=[f'{loc + xlow:.0f}' for loc in locs])
 
             locs = ax['I'].get_yticks()
-            new_labels = [f'{loc + ylow:.0f}' for loc in locs] 
-            #ax['I'].set_yticks(locs, labels=new_labels)
+            locs = locs[(locs >= 0) & (locs < h)]
+            ax['I'].set_yticks(locs, labels=[f'{loc + ylow:.0f}' for loc in locs])
 
 
             plt.tight_layout()
@@ -662,6 +961,29 @@ class periodogram_detection():
         self.bin_phase()
 
 
+    def filter_sources(self):
+        """Apply quality cuts based on phase_coherence_lim, period_max_frac, and local_threshold."""
+        if self.sources is None:
+            return
+        mask = np.ones(len(self.sources), dtype=bool)
+
+        if self.phase_coherence_lim is not None and 'phase_coherence' in self.sources:
+            mask &= self.sources['phase_coherence'].values >= self.phase_coherence_lim
+
+        if self.period_max_frac is not None and self._period_high is not None:
+            period_max = self._period_high * self.period_max_frac
+            mask &= (1.0 / self.sources['freq'].values) <= period_max
+
+        if self.odd_even_asymmetry_lim is not None and 'odd_even_asymmetry' in self.sources:
+            asym = self.sources['odd_even_asymmetry'].values
+            mask &= np.where(np.isfinite(asym), asym <= self.odd_even_asymmetry_lim, True)
+
+        n_before = len(self.sources)
+        self.sources = self.sources[mask].reset_index(drop=True)
+        n_after = len(self.sources)
+        if n_before != n_after:
+            print(f'filter_sources: {n_before} → {n_after} sources')
+
     def run(self):
         self.clean_data()
         print('making cube')
@@ -676,8 +998,17 @@ class periodogram_detection():
         if self.sources is not None:
             print('finding peak frequency')
             self.find_peak_power()
+            print('refining centroids')
+            self.refine_centroids()
             print('finding fundamental period')
             self.find_fundamental()
+            print('measuring phase coherence')
+            self.measure_phase_coherence()
+            print('measuring harmonic power')
+            self.measure_harmonic_power()
+            print('odd-even asymmetry test')
+            self.measure_odd_even_asymmetry()
+            self.filter_sources()
         else:
             print('No sources detected.')
             return
