@@ -481,7 +481,7 @@ class periodogram_detection():
 
         shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
 
-        results = Parallel(n_jobs=int(multiprocessing.cpu_count()),backend='loky')(delayed(run_reg_ls)(lc) for lc in shaped)
+        results = Parallel(n_jobs=self.cpu,backend='loky')(delayed(run_reg_ls)(lc) for lc in shaped)
 
 
 
