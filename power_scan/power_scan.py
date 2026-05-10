@@ -463,8 +463,12 @@ class periodogram_detection():
                                        fmin=1/self._period_high,fmax=1/self._period_low,nterms=1)
         self.power = batched.power.T.reshape(batched.power.shape[1],self.data.shape[1],self.data.shape[2])
         self.freq = batched.freq()
-        m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
-        self.power_norm = (self.power-med[:,np.newaxis,np.newaxis]) / std[:,np.newaxis,np.newaxis]
+        # m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
+        # self.power_norm = (self.power-med[:,np.newaxis,np.newaxis]) / std[:,np.newaxis,np.newaxis]
+        p = self.power.reshape(len(self.freq), -1)
+        med = np.median(p, axis=1)
+        std = np.median(np.abs(p - med[:, np.newaxis]), axis=1) * 1.4826
+        self.power_norm = (self.power - med[:, np.newaxis, np.newaxis]) / std[:, np.newaxis, np.newaxis]
         
         # if self._period_low is None:
         #     self._set_period_lim()
