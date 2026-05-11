@@ -988,6 +988,22 @@ class periodogram_detection():
         if n_before != n_after:
             print(f'filter_sources: {n_before} → {n_after} sources')
 
+    def refine_periods(self, samples_per_peak=100, freq_window=0.05):
+        for i in range(len(self.sources)):
+            freq = self.sources['freq'].iloc[i]
+            lc = self.lcs[i]
+            t, f = lc[0], lc[1]
+            fmin = freq * (1 - freq_window)
+            fmax = freq * (1 + freq_window)
+            ls = LombScargle(t, f)
+            freq_fine, power_fine = ls.autopower(minimum_frequency=fmin, maximum_frequency=fmax,
+                                                  samples_per_peak=samples_per_peak)
+            best_freq = freq_fine[np.argmax(power_fine)]
+            self.sources.loc[i, 'freq'] = best_freq
+        self.sources['period'] = 1 / self.sources['freq'].values
+        self.phase_fold()
+        self.bin_phase()
+
     def run(self):
         self.clean_data()
         print('making cube')
@@ -1006,6 +1022,8 @@ class periodogram_detection():
             self.refine_centroids()
             print('finding fundamental period')
             self.find_fundamental()
+            print('refining periods')
+            self.refine_periods()
             print('measuring phase coherence')
             self.measure_phase_coherence()
             print('measuring harmonic power')
