@@ -877,7 +877,7 @@ class periodogram_detection():
             ax['A'].set_ylim(down,up)
             ax['A'].set_xlabel(f'MJD + {int(start)}')
             ax['A'].set_ylabel('Counts')
-            ax['B'].set_title('Phase fold (p = ' + str(np.round(1/self.sources['freq'].iloc[i],2)) + ' days)')
+            ax['B'].set_title(f'Phase fold (p = {1/self.sources["freq"].iloc[i]:.3g} days)')
             ax['B'].plot(self.phase[i][0],self.phase[i][1],'.',alpha=0.1)
             ax['B'].plot(self.binned[i][0],self.binned[i][1],'.')
             ax['B'].set_xlabel('Phase')
