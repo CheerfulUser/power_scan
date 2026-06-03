@@ -152,18 +152,14 @@ def _odd_even_asymmetry(time, flux, freq, n_bins=20):
     """
     phase = ((time - time[0]) * (freq / 2.0)) % 1.0
 
+    from scipy.stats import binned_statistic
     bins = np.linspace(0, 1, n_bins + 1)
     half = n_bins // 2
-    first, second = [], []
-    for i in range(n_bins):
-        mask = (phase >= bins[i]) & (phase < bins[i + 1])
-        if mask.sum() < 2:
-            (first if i < half else second).append(np.nan)
-        else:
-            (first if i < half else second).append(np.median(flux[mask]))
-
-    first  = np.array(first)
-    second = np.array(second)
+    meds, _, bin_num = binned_statistic(phase, flux, statistic='median', bins=bins)
+    counts, _, _     = binned_statistic(phase, flux, statistic='count',  bins=bins)
+    meds[counts < 2] = np.nan
+    first  = meds[:half]
+    second = meds[half:]
 
     # Mean-centre each half independently so depth offsets don't dominate
     first  -= np.nanmedian(first)
@@ -195,22 +191,22 @@ def _phase_coherence(time, data, x, y, freq, radius=2.0):
     t = time - time[0]
     omega = 2 * np.pi * freq
 
-    phases = []
-    for dy in range(-r, r + 1):
-        for dx in range(-r, r + 1):
-            if np.hypot(dx, dy) > radius:
-                continue
-            px, py = xi + dx, yi + dy
-            if 0 <= px < nx and 0 <= py < ny:
-                lc = data[:, py, px].astype(float)
-                lc -= lc.mean()
-                c = np.dot(lc, np.cos(omega * t))
-                s = np.dot(lc, np.sin(omega * t))
-                phases.append(np.arctan2(s, c))
-
-    if len(phases) < 2:
+    dy_arr = np.arange(-r, r + 1)
+    dx_arr = np.arange(-r, r + 1)
+    dy_grid, dx_grid = np.meshgrid(dy_arr, dx_arr, indexing='ij')
+    in_ap = np.hypot(dx_grid, dy_grid) <= radius
+    py_arr = (yi + dy_grid[in_ap]).ravel()
+    px_arr = (xi + dx_grid[in_ap]).ravel()
+    valid = (px_arr >= 0) & (px_arr < nx) & (py_arr >= 0) & (py_arr < ny)
+    py_arr, px_arr = py_arr[valid], px_arr[valid]
+    if len(px_arr) < 2:
         return np.nan
-    return float(np.abs(np.mean(np.exp(1j * np.array(phases)))))
+    lcs = data[:, py_arr, px_arr].T.astype(float)   # (N_pix, T)
+    lcs -= lcs.mean(axis=1, keepdims=True)
+    cos_t = np.cos(omega * t)
+    sin_t = np.sin(omega * t)
+    phases = np.arctan2(lcs @ sin_t, lcs @ cos_t)
+    return float(np.abs(np.mean(np.exp(1j * phases))))
 
 
 def _harmonic_power(freq, power_norm, freq_array, x, y, radius=1.5):
@@ -228,16 +224,17 @@ def _harmonic_power(freq, power_norm, freq_array, x, y, radius=1.5):
     xi, yi = int(round(x)), int(round(y))
     r = int(np.ceil(radius))
 
-    vals = []
-    for dy in range(-r, r + 1):
-        for dx in range(-r, r + 1):
-            if np.hypot(dx, dy) > radius:
-                continue
-            px, py = xi + dx, yi + dy
-            if 0 <= px < nx and 0 <= py < ny:
-                vals.append(power_norm[h_idx, py, px])
-
-    return float(np.mean(vals)) if vals else np.nan
+    dy_arr = np.arange(-r, r + 1)
+    dx_arr = np.arange(-r, r + 1)
+    dy_grid, dx_grid = np.meshgrid(dy_arr, dx_arr, indexing='ij')
+    in_ap = np.hypot(dx_grid, dy_grid) <= radius
+    py_arr = (yi + dy_grid[in_ap]).ravel()
+    px_arr = (xi + dx_grid[in_ap]).ravel()
+    valid = (px_arr >= 0) & (px_arr < nx) & (py_arr >= 0) & (py_arr < ny)
+    py_arr, px_arr = py_arr[valid], px_arr[valid]
+    if len(px_arr) == 0:
+        return np.nan
+    return float(np.mean(power_norm[h_idx, py_arr, px_arr]))
 
 
 def _Spatial_group(result,min_samples=1,distance=1,njobs=-1,write_col='objid'):
@@ -257,15 +254,78 @@ def _Spatial_group(result,min_samples=1,distance=1,njobs=-1,write_col='objid'):
     return result
  
 def compress_freq_groups(result):
-    inds = []
-    for i in result['objid'].unique():
-        obj_ind = result['objid'].values==i
-        obj = result.iloc[obj_ind]
-        ind = np.argmax(obj['local_sig'].values)
-        inds += [np.where(obj_ind)[0][ind]]
-    inds = np.array(inds)
-    final = result.iloc[inds]
-    return final
+    idx = result.groupby('objid')['local_sig'].idxmax()
+    return result.loc[idx].reset_index(drop=True)
+
+
+def _aperture_frame(frame, aperture, annulus_aperture):
+    from astropy.stats import sigma_clip
+    from scipy.signal import fftconvolve
+    from photutils.aperture import ApertureStats, aperture_photometry
+    m = sigma_clip(frame, masked=True, sigma=5).mask
+    mask = fftconvolve(m, np.ones((3, 3)), mode='same') > 0.5
+    sky = ApertureStats(frame, annulus_aperture, mask=mask)
+    phot = aperture_photometry(frame, aperture)
+    return phot['aperture_sum'].value[0], aperture.area * sky.std
+
+
+def _fundamental_one(lc, freq, src_power, src_power_ind, source_power_1d,
+                     source_power_norm_1d, freq_array, period_high, odd_even_threshold):
+    alias = np.array([0.5, 1.0, 2.0])
+    t_span = lc[0, -1] - lc[0, 0]
+    grad_sum = []
+    for a in alias:
+        phase = ((lc[0] - lc[0, 0]) * freq * a) % 1
+        p = lc[1, np.argsort(phase)]
+        metric = np.sum(np.abs(np.diff(p)))
+        if (1.0 / (freq * a)) > t_span / 1.5:
+            metric = 1e6
+        grad_sum.append(metric)
+    grad_sum = np.array(grad_sum)
+    ind = int(np.argmin(grad_sum))
+    if ind != 1:
+        new_ind = int(np.argmin(np.abs(freq_array - freq * alias[ind])))
+        if new_ind < len(source_power_1d):
+            old_pn = source_power_norm_1d[int(src_power_ind)]
+            ratio   = source_power_1d[new_ind] / src_power if src_power != 0 else np.inf
+            ratio_n = source_power_norm_1d[new_ind] / old_pn if old_pn != 0 else np.inf
+            if (ratio < 0.2) and (ratio_n < 0.2):
+                ind = 1
+        else:
+            ind = 1
+    if ind == 1:
+        if period_high is not None and (2.0 / freq) <= period_high:
+            asym = _odd_even_asymmetry(lc[0], lc[1], freq)
+            if np.isfinite(asym) and asym > odd_even_threshold:
+                ind = 2
+    snap_idx = int(np.argmin(np.abs(freq_array - freq * alias[ind])))
+    return _refine_peak_freq(freq_array, source_power_norm_1d, snap_idx)
+
+
+def _refine_centroid_one(im, x0, y0, half_width, nx, ny):
+    from scipy.optimize import curve_fit
+    def gaussian2d(xy, A, x0, y0, sx, sy, C):
+        x, y = xy
+        return (A * np.exp(-0.5 * ((x - x0) / sx) ** 2
+                           - 0.5 * ((y - y0) / sy) ** 2) + C).ravel()
+    xi, yi = int(round(x0)), int(round(y0))
+    xlo = max(0, xi - half_width); xhi = min(nx, xi + half_width + 1)
+    ylo = max(0, yi - half_width); yhi = min(ny, yi + half_width + 1)
+    cutout = im[ylo:yhi, xlo:xhi].astype(float)
+    if cutout.size < 9:
+        return None
+    yg, xg = np.mgrid[ylo:yhi, xlo:xhi].astype(float)
+    p0 = [cutout.max() - cutout.min(), x0, y0, 1.5, 1.5, cutout.min()]
+    try:
+        popt, _ = curve_fit(
+            gaussian2d, (xg.ravel(), yg.ravel()), cutout.ravel(),
+            p0=p0,
+            bounds=([0, xlo, ylo, 0.3, 0.3, -np.inf],
+                    [np.inf, xhi, yhi, half_width, half_width, np.inf]),
+            maxfev=2000)
+        return float(popt[1]), float(popt[2])
+    except Exception:
+        return None
 
 
 def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
@@ -291,19 +351,11 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
     if method.lower() == 'aperture':
         aperture = CircularAperture([x, y], radius)
         annulus_aperture = RectangularAnnulus([x,y], w_in=5, w_out=20,h_out=20)
-        flux = []
-        flux_err = []
-        for i in range(len(f)):
-            m = sigma_clip(f[i],masked=True,sigma=5).mask
-            mask = fftconvolve(m, np.ones((3,3)), mode='same') > 0.5
-            aperstats_sky = ApertureStats(f[i], annulus_aperture,mask = mask)
-            phot_table = aperture_photometry(f[i], aperture)
-            bkg_std = aperstats_sky.std
-            flux_err += [aperture.area * bkg_std]
-            flux += [phot_table['aperture_sum'].value[0]]
-        flux = np.array(flux)
-        flux_err = np.array(flux_err)
-        return t, flux, flux_err
+        results = Parallel(n_jobs=-1, prefer='threads')(
+            delayed(_aperture_frame)(f[i], aperture, annulus_aperture)
+            for i in range(len(f)))
+        flux, flux_err = zip(*results)
+        return t, np.array(flux), np.array(flux_err)
     elif method.lower() == 'sum':
         xint = int(np.round(x,0))
         yint = int(np.round(y,0))
@@ -640,53 +692,43 @@ class periodogram_detection():
 
 
     def phase_fold(self):
-        phases = []
-        for i in range(len(self.lcs)):
-            freq = self.sources['freq'].iloc[i]
-            lc = self.lcs[i]
-            phase = lc[0] - lc[0,0]
-            #phase = ((lc[0] - lc[0,0]) / (1/freq)) % 1
-            phase = ((lc[0] - lc[0,0]) / (1/freq)) % 1
-            phases += [np.array([phase,lc[1]])]
-        phases = np.array(phases)
-        self.phase = phases
+        freqs = self.sources['freq'].values[:, np.newaxis]  # (N, 1)
+        times = self.lcs[:, 0, :]                           # (N, T)
+        flux  = self.lcs[:, 1, :]                           # (N, T)
+        phases = ((times - times[:, 0:1]) * freqs) % 1     # (N, T)
+        self.phase = np.stack([phases, flux], axis=1)       # (N, 2, T)
 
-    def bin_phase(self,phase_bin=0.01):
+    def bin_phase(self, phase_bin=0.01):
+        from scipy.stats import binned_statistic
+        bins = np.arange(0, 1 + phase_bin, phase_bin)
+        ps = (bins[:-1] + bins[1:]) / 2
         binned = []
-        bins = np.arange(0,1 + phase_bin,phase_bin)
         for phase in self.phase:
-            av = []
-            ps = []
-            for i in range(len(bins) - 1):
-                ind = (bins[i] <= phase[0]) & (bins[i+1] > phase[0])
-                med = np.median(phase[1,ind])
-                p = (bins[i] + bins[i+1]) / 2
-                av += [med]
-                ps += [p]
-            av = np.array(av)
-            ps = np.array(ps)
-            lc = np.array([ps,av])
-            binned += [lc]
-        binned = np.array(binned)
-        self.binned = binned
+            meds, _, _ = binned_statistic(phase[0], phase[1], statistic='median', bins=bins)
+            binned.append(np.array([ps, meds]))
+        self.binned = np.array(binned)
 
     def find_peak_power(self):
         from scipy.signal import find_peaks
         self.sources['power'] = np.nan
         if self.source_power is None:
             self.get_lightcurves()
-        for i in range(len(self.lcs)):
-            power = self.source_power[i,1] 
-            power_norm = self.source_power_norm[i,1] 
-            peaks, _ = find_peaks(power_norm, height=np.max(power_norm)*0.5)
+
+        def _peak_one(i):
+            pn = self.source_power_norm[i, 1]
+            pw = self.source_power[i, 1]
+            peaks, _ = find_peaks(pn, height=np.max(pn) * 0.5)
             if len(peaks) == 0:
-                peaks = np.array([int(np.argmax(power_norm))])
+                peaks = np.array([int(np.argmax(pn))])
+            p_ind = int(peaks[np.argmax(pw[peaks])])
+            return p_ind, self.freq[p_ind], pw[p_ind]
 
-            p_ind = peaks[np.argmax(power[peaks])]
-
-            self.sources.loc[i,'power_ind'] = p_ind
-            self.sources.loc[i,'freq'] = self.freq[p_ind]
-            self.sources.loc[i,'power'] = power[p_ind]
+        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_peak_one)(i) for i in range(len(self.lcs)))
+        p_inds, freqs, powers = zip(*results)
+        self.sources['power_ind'] = list(p_inds)
+        self.sources['freq']      = list(freqs)
+        self.sources['power']     = list(powers)
 
     def refine_centroids(self, half_width=4):
         """
@@ -694,41 +736,19 @@ class periodogram_detection():
         at the peak frequency.  Replaces the sep flux-weighted centroid, which can
         be biased when a PSF filter kernel is used.
         """
-        from scipy.optimize import curve_fit
-
-        def gaussian2d(xy, A, x0, y0, sx, sy, C):
-            x, y = xy
-            return (A * np.exp(-0.5 * ((x - x0) / sx) ** 2
-                               -0.5 * ((y - y0) / sy) ** 2) + C).ravel()
-
         ny, nx = self.power_norm.shape[1], self.power_norm.shape[2]
-        for i in range(len(self.sources)):
-            x0 = self.sources['xcentroid'].iloc[i]
-            y0 = self.sources['ycentroid'].iloc[i]
-            p_ind = int(self.sources['power_ind'].iloc[i])
-            im = self.power_norm[p_ind]
-
-            xi, yi = int(round(x0)), int(round(y0))
-            xlo = max(0, xi - half_width)
-            xhi = min(nx, xi + half_width + 1)
-            ylo = max(0, yi - half_width)
-            yhi = min(ny, yi + half_width + 1)
-            cutout = im[ylo:yhi, xlo:xhi].astype(float)
-            if cutout.size < 9:
-                continue
-
-            yg, xg = np.mgrid[ylo:yhi, xlo:xhi].astype(float)
-            p0 = [cutout.max() - cutout.min(), x0, y0, 1.5, 1.5, cutout.min()]
-            bounds_lo = [0, xlo, ylo, 0.3, 0.3, -np.inf]
-            bounds_hi = [np.inf, xhi, yhi, half_width, half_width, np.inf]
-            try:
-                popt, _ = curve_fit(gaussian2d, (xg.ravel(), yg.ravel()),
-                                    cutout.ravel(), p0=p0,
-                                    bounds=(bounds_lo, bounds_hi), maxfev=2000)
-                self.sources.loc[i, 'xcentroid'] = float(popt[1])
-                self.sources.loc[i, 'ycentroid'] = float(popt[2])
-            except Exception:
-                pass
+        results = Parallel(n_jobs=self.cpu)(
+            delayed(_refine_centroid_one)(
+                self.power_norm[int(self.sources['power_ind'].iloc[i])],
+                float(self.sources['xcentroid'].iloc[i]),
+                float(self.sources['ycentroid'].iloc[i]),
+                half_width, nx, ny,
+            )
+            for i in range(len(self.sources)))
+        for i, res in enumerate(results):
+            if res is not None:
+                self.sources.loc[i, 'xcentroid'] = res[0]
+                self.sources.loc[i, 'ycentroid'] = res[1]
 
     def validate_peak_centroids(self, top_n=2):
         if self.sources is None:
@@ -780,57 +800,25 @@ class periodogram_detection():
     def find_fundamental(self, odd_even_threshold=0.3):
         if self.lcs is None:
             self.make_lcs()
-        for j in range(len(self.lcs)):
-            freq = self.sources['freq'].iloc[j]
-            lc = self.lcs[j]
-            alias = np.array([1/2,1,2])
-            grad_sum = []
-            for i in range(len(alias)):
-                phase = lc[0] - lc[0,0]
-                phase = ((lc[0] - lc[0,0]) / (1/(freq*alias[i]))) % 1
-                new_period = 1/(freq*alias[i])
-                p = lc[1,np.argsort(phase)]
-                metric = np.sum(abs(np.diff(p)))
-                if new_period > (lc[0,-1]-lc[0,0])/1.5:
-                    metric = 1e6
-                grad_sum += [metric]
-            grad_sum = np.array(grad_sum)
-            ind = np.argmin(grad_sum)
-            if ind != 1:
-                m = abs(self.freq - freq * alias[ind])
-                new_ind = np.argmin(m)
-                if new_ind < len(self.source_power[j,1]):
-                    new_power = self.source_power[j,1,new_ind]
-                    ratio = new_power / self.sources['power'].iloc[j]
-                    new_power = self.source_power_norm[j,1,new_ind]
-                    old_power = self.source_power_norm[j,1,self.sources['power_ind'].iloc[j]]
-                    ratio_n = new_power / old_power
-                    if (ratio < 0.2) & (ratio_n < 0.2):
-                        ind = 1
-                else:
-                    ind = 1
 
-            # Odd-even check: the total-variation metric always prefers a
-            # single-dip fold, so it will never spontaneously choose 2P for
-            # an eclipsing binary. If the period was kept (ind==1), test
-            # whether the 2P fold has asymmetric half-cycles — the hallmark
-            # of unequal primary and secondary eclipses.
-            if ind == 1:
-                doubled_period = 2.0 / freq
-                if self._period_high is not None and doubled_period <= self._period_high:
-                    asym = _odd_even_asymmetry(lc[0], lc[1], freq)
-                    if np.isfinite(asym) and asym > odd_even_threshold:
-                        ind = 2
+        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_fundamental_one)(
+                self.lcs[j],
+                float(self.sources['freq'].iloc[j]),
+                float(self.sources['power'].iloc[j]),
+                int(self.sources['power_ind'].iloc[j]),
+                self.source_power[j, 1],
+                self.source_power_norm[j, 1],
+                self.freq,
+                self._period_high,
+                odd_even_threshold,
+            )
+            for j in range(len(self.lcs)))
 
-            # Snap to nearest grid point then refine with a 5-point Gaussian
-            # fit so the stored frequency lands on the true sub-bin peak.
-            snap_idx = int(np.argmin(np.abs(self.freq - freq * alias[ind])))
-            refined_freq, peak_idx = _refine_peak_freq(
-                self.freq, self.source_power_norm[j, 1], snap_idx)
-            self.sources.loc[j, 'freq']      = refined_freq
-            self.sources.loc[j, 'power_ind'] = peak_idx
-
-        self.sources['period'] = 1/self.sources['freq'].values
+        refined_freqs, peak_idxs = zip(*results)
+        self.sources['freq']      = list(refined_freqs)
+        self.sources['power_ind'] = list(peak_idxs)
+        self.sources['period']    = 1.0 / self.sources['freq'].values
         self.phase_fold()
         self.bin_phase()
 
@@ -854,13 +842,14 @@ class periodogram_detection():
             radius = self.aperture_radius
         if self.sources is None or len(self.sources) == 0:
             return
-        r_vals = []
-        for i in range(len(self.sources)):
-            src = self.sources.iloc[i]
-            r = _phase_coherence(self.time, self.data,
-                                 float(src['xcentroid']), float(src['ycentroid']),
-                                 float(src['freq']), radius)
-            r_vals.append(r)
+        r_vals = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_phase_coherence)(
+                self.time, self.data,
+                float(self.sources['xcentroid'].iloc[i]),
+                float(self.sources['ycentroid'].iloc[i]),
+                float(self.sources['freq'].iloc[i]),
+                radius)
+            for i in range(len(self.sources)))
         self.sources = self.sources.copy()
         self.sources['phase_coherence'] = r_vals
 
@@ -881,23 +870,23 @@ class periodogram_detection():
             radius = self.aperture_radius
         if self.sources is None or len(self.sources) == 0:
             return
-        h_powers, h_ratios = [], []
-        for i in range(len(self.sources)):
+        def _harmonic_one(i):
             src = self.sources.iloc[i]
             peak_pn = float(self.power_norm[
                 int(src['power_ind']),
                 int(round(float(src['ycentroid']))),
-                int(round(float(src['xcentroid'])))
-            ])
+                int(round(float(src['xcentroid'])))])
             hp = _harmonic_power(float(src['freq']), self.power_norm, self.freq,
-                                 float(src['xcentroid']), float(src['ycentroid']),
-                                 radius)
-            h_powers.append(hp)
+                                 float(src['xcentroid']), float(src['ycentroid']), radius)
             ratio = (hp / peak_pn) if (np.isfinite(hp) and peak_pn > 0) else np.nan
-            h_ratios.append(ratio)
+            return hp, ratio
+
+        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_harmonic_one)(i) for i in range(len(self.sources)))
+        h_powers, h_ratios = zip(*results) if results else ([], [])
         self.sources = self.sources.copy()
-        self.sources['harmonic_power'] = h_powers
-        self.sources['harmonic_ratio'] = h_ratios
+        self.sources['harmonic_power'] = list(h_powers)
+        self.sources['harmonic_ratio'] = list(h_ratios)
 
     def measure_odd_even_asymmetry(self, n_bins=20):
         """
@@ -913,11 +902,11 @@ class periodogram_detection():
         """
         if self.sources is None or len(self.sources) == 0:
             return
-        scores = []
-        for i in range(len(self.sources)):
-            freq = float(self.sources['freq'].iloc[i])
-            t, f = self.lcs[i][0], self.lcs[i][1]
-            scores.append(_odd_even_asymmetry(t, f, freq, n_bins))
+        scores = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_odd_even_asymmetry)(
+                self.lcs[i][0], self.lcs[i][1],
+                float(self.sources['freq'].iloc[i]), n_bins)
+            for i in range(len(self.sources)))
         self.sources = self.sources.copy()
         self.sources['odd_even_asymmetry'] = scores
 
