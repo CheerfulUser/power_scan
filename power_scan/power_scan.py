@@ -329,6 +329,7 @@ class periodogram_detection():
                  local_threshold=10,savepath=None,psf_kernel=None,
                  phase_coherence_lim=None,period_max_frac=None,
                  odd_even_asymmetry_lim=None,
+                 backend='auto',
                  run=True):
         """
         Detect faint variable objects in time-series image data.
@@ -380,6 +381,7 @@ class periodogram_detection():
         self.fwhm = fwhm
         self.dao_peak = dao_peak
         self.cpu = _available_cores() if cpu == -1 else cpu
+        self.backend = backend
         self.aperture_radius = aperture_radius
         self.snr_search_lim = snr_search_lim
         self.period_lim = period_lim
@@ -445,7 +447,8 @@ class periodogram_detection():
         power_blocks = []
 
         temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0],
-                                               fmin=(1/self._period_high),fmax=(1/self._period_low),nterms=1)
+                                               fmin=(1/self._period_high),fmax=(1/self._period_low),nterms=1,
+                                               backend=self.backend)
         freq = temp.freq()
         power = np.zeros((len(freq),self.data.shape[1],self.data.shape[2]))
         for i in range(len(dy)-1):
@@ -453,7 +456,8 @@ class periodogram_detection():
                 cut = self.data[:,dy[i]:dy[i+1],dx[j]:dx[j+1]]
                 shaped = cut.reshape(len(cut),cut.shape[1]*cut.shape[2]).T
                 batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
-                                               fmin=1/self._period_high,fmax=1/self._period_low,nterms=1)
+                                               fmin=1/self._period_high,fmax=1/self._period_low,nterms=1,
+                                               backend=self.backend)
                 power_block = batched.power.T.reshape(batched.power.shape[1],cut.shape[1],cut.shape[2])
                 power[:,dy[i]:dy[i+1],dx[j]:dx[j+1]] = power_block
         
@@ -477,7 +481,8 @@ class periodogram_detection():
         
         shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
         batched = nifty_ls.lombscargle(self.time-self.time[0],shaped,
-                                       fmin=1/self._period_high,fmax=1/self._period_low,nterms=1)
+                                       fmin=1/self._period_high,fmax=1/self._period_low,nterms=1,
+                                       backend=self.backend)
         self.power = batched.power.T.reshape(batched.power.shape[1],self.data.shape[1],self.data.shape[2])
         self.freq = batched.freq()
         # m,med,std = sigma_clipped_stats(self.power,axis=(1,2))
