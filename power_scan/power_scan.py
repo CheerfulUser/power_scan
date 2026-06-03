@@ -351,7 +351,7 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
     if method.lower() == 'aperture':
         aperture = CircularAperture([x, y], radius)
         annulus_aperture = RectangularAnnulus([x,y], w_in=5, w_out=20,h_out=20)
-        results = Parallel(n_jobs=-1, prefer='threads')(
+        results = Parallel(n_jobs=_available_cores(), backend='multiprocessing')(
             delayed(_aperture_frame)(f[i], aperture, annulus_aperture)
             for i in range(len(f)))
         flux, flux_err = zip(*results)
@@ -739,7 +739,7 @@ class periodogram_detection():
             p_ind = int(peaks[np.argmax(pw[peaks])])
             return p_ind, self.freq[p_ind], pw[p_ind]
 
-        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_peak_one)(i) for i in range(len(self.lcs)))
         p_inds, freqs, powers = zip(*results)
         self.sources['power_ind'] = list(p_inds)
@@ -817,7 +817,7 @@ class periodogram_detection():
         if self.lcs is None:
             self.make_lcs()
 
-        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_fundamental_one)(
                 self.lcs[j],
                 float(self.sources['freq'].iloc[j]),
@@ -858,7 +858,7 @@ class periodogram_detection():
             radius = self.aperture_radius
         if self.sources is None or len(self.sources) == 0:
             return
-        r_vals = Parallel(n_jobs=self.cpu, prefer='threads')(
+        r_vals = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_phase_coherence)(
                 self.time, self.data,
                 float(self.sources['xcentroid'].iloc[i]),
@@ -897,7 +897,7 @@ class periodogram_detection():
             ratio = (hp / peak_pn) if (np.isfinite(hp) and peak_pn > 0) else np.nan
             return hp, ratio
 
-        results = Parallel(n_jobs=self.cpu, prefer='threads')(
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_harmonic_one)(i) for i in range(len(self.sources)))
         h_powers, h_ratios = zip(*results) if results else ([], [])
         self.sources = self.sources.copy()
@@ -918,7 +918,7 @@ class periodogram_detection():
         """
         if self.sources is None or len(self.sources) == 0:
             return
-        scores = Parallel(n_jobs=self.cpu, prefer='threads')(
+        scores = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_odd_even_asymmetry)(
                 self.lcs[i][0], self.lcs[i][1],
                 float(self.sources['freq'].iloc[i]), n_bins)
@@ -1072,7 +1072,7 @@ class periodogram_detection():
                 samples_per_peak=samples_per_peak)
             return float(freq_fine[np.argmax(power_fine)])
 
-        best_freqs = Parallel(n_jobs=self.cpu, prefer='threads')(
+        best_freqs = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
             delayed(_refine_one)(i) for i in range(len(self.sources)))
         self.sources['freq']   = best_freqs
         self.sources['period'] = 1.0 / self.sources['freq'].values
