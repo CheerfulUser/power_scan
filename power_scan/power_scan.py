@@ -469,18 +469,20 @@ class periodogram_detection():
     def clean_data(self):
         good = np.where(np.isfinite(np.sum(self.data,axis=(1,2))))
         self.data = self.data[good]
-        #self.error = self.error[good]
+        if self.error is not None:
+            self.error = self.error[good]
         self.time = self.time[good]
-        
+
         ind = np.argsort(self.time)
         self.time = self.time[ind]
         self.data = self.data[ind]
+        if self.error is not None:
+            self.error = self.error[ind]
     
     def _set_period_lim(self):
         if isinstance(self.period_lim, str) and self.period_lim == 'auto':
-            self._period_low = np.median(np.diff(self.time)) * 2 
-            print(self.time.shape)
-            self._period_high = (self.time[-1] - self.time[0]) / 1.5 
+            self._period_low = np.median(np.diff(self.time)) * 2
+            self._period_high = (self.time[-1] - self.time[0]) / 1.5
         else:
             try:
                 self._period_low = np.min(self.period_lim)
@@ -496,8 +498,6 @@ class periodogram_detection():
 
         dx = np.arange(0,self.data.shape[2]+self.block_size,self.block_size)
         dy = np.arange(0,self.data.shape[1]+self.block_size,self.block_size)
-        power_blocks = []
-
         temp = nifty_ls.lombscargle(self.time-self.time[0],self.data[:,0,0],
                                                fmin=(1/self._period_high),fmax=(1/self._period_low),nterms=1,
                                                backend=self.backend)
@@ -553,13 +553,29 @@ class periodogram_detection():
         self.power_norm = self.power_norm[ind]
 
     def loky_make_freq_cube(self):
-        import multiprocessing
         if self._period_low is None:
             self._set_period_lim()
 
-        shaped = self.data.reshape(len(self.data),self.data.shape[1]*self.data.shape[2]).T
+        t0 = self.time - self.time[0]
+        max_freq = 1.0 / self._period_low
+        shaped = self.data.reshape(len(self.data), self.data.shape[1] * self.data.shape[2]).T
 
-        results = Parallel(n_jobs=self.cpu,backend='loky')(delayed(run_reg_ls)(lc) for lc in shaped)
+        results = Parallel(n_jobs=self.cpu, backend='loky')(
+            delayed(run_reg_ls)((t0, lc), max_freq=max_freq) for lc in shaped)
+
+        freq = results[0][0]
+        power_flat = np.array([r[1] for r in results])  # (N_pixels, N_freq)
+        self.freq = freq
+        self.power = power_flat.T.reshape(len(freq), self.data.shape[1], self.data.shape[2])
+        p = self.power.reshape(len(self.freq), -1)
+        med = np.median(p, axis=1)
+        std = np.median(np.abs(p - med[:, np.newaxis]), axis=1) * 1.4826
+        self.power_norm = (self.power - med[:, np.newaxis, np.newaxis]) / std[:, np.newaxis, np.newaxis]
+        ind = (self.freq < 1 / self._period_low) & (self.freq > 1 / self._period_high)
+        self.power = self.power[ind]
+        self.freq = self.freq[ind]
+        self.period = 1 / self.freq
+        self.power_norm = self.power_norm[ind]
 
 
 
@@ -602,7 +618,7 @@ class periodogram_detection():
                 for u in unique:
                     if np.sum(u) > 1:
                         snr = group.loc[u,'flux']
-                        ind = np.argmax(snr)
+                        ind = snr.idxmax()
                         adding = pd.DataFrame([group.loc[ind]]) # pandas is trash
                         keep = pd.concat([keep,adding], ignore_index=True)
                         if plot:
@@ -623,7 +639,7 @@ class periodogram_detection():
             snr_lim = self.snr_lim
         detect = self.detections
         if detect is not None:
-            detect = detect.loc[detect['flux'] >= snr_lim]
+            detect = detect.loc[detect['local_sig'] >= snr_lim]
             # Pre-filter by period before grouping so junk long-period detections
             # cannot out-compete real detections at the same spatial position.
             if self.period_max_frac is not None and self._period_high is not None:
@@ -1012,7 +1028,7 @@ class periodogram_detection():
             else:
                 savename = self.savename
 
-        self.sources.to_csv(savepath+savename,index=False)
+        self.sources.to_csv(os.path.join(savepath, savename), index=False)
 
     #def save_lightcurves(self)
 
@@ -1047,18 +1063,19 @@ class periodogram_detection():
             print(f'filter_sources: {n_before} → {n_after} sources')
 
     def refine_periods(self, samples_per_peak=100, freq_window=0.05):
-        for i in range(len(self.sources)):
+        def _refine_one(i):
             freq = self.sources['freq'].iloc[i]
-            lc = self.lcs[i]
-            t, f = lc[0], lc[1]
-            fmin = freq * (1 - freq_window)
-            fmax = freq * (1 + freq_window)
-            ls = LombScargle(t, f)
-            freq_fine, power_fine = ls.autopower(minimum_frequency=fmin, maximum_frequency=fmax,
-                                                  samples_per_peak=samples_per_peak)
-            best_freq = freq_fine[np.argmax(power_fine)]
-            self.sources.loc[i, 'freq'] = best_freq
-        self.sources['period'] = 1 / self.sources['freq'].values
+            t, f = self.lcs[i][0], self.lcs[i][1]
+            freq_fine, power_fine = LombScargle(t, f).autopower(
+                minimum_frequency=freq * (1 - freq_window),
+                maximum_frequency=freq * (1 + freq_window),
+                samples_per_peak=samples_per_peak)
+            return float(freq_fine[np.argmax(power_fine)])
+
+        best_freqs = Parallel(n_jobs=self.cpu, prefer='threads')(
+            delayed(_refine_one)(i) for i in range(len(self.sources)))
+        self.sources['freq']   = best_freqs
+        self.sources['period'] = 1.0 / self.sources['freq'].values
         self.phase_fold()
         self.bin_phase()
 
