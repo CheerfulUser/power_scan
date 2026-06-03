@@ -1,3 +1,5 @@
+import os
+import multiprocessing
 import numpy as np
 from astropy.timeseries import LombScargle
 from astropy.stats import sigma_clipped_stats, sigma_clip
@@ -5,14 +7,29 @@ from scipy.signal import find_peaks
 from photutils.detection import DAOStarFinder
 import pandas as pd
 import nifty_ls
-from joblib import Parallel, delayed 
+from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 from copy import deepcopy
 import sep
+
 # import warnings
 # from photutils.utils import NoDetectionsWarning
 
 # warnings.filterwarnings("ignore", category=NoDetectionsWarning)
+
+def _available_cores():
+	"""Return CPU cores available to this process, respecting SLURM allocations."""
+	slurm = os.environ.get('SLURM_CPUS_PER_TASK')
+	if slurm is not None:
+		try:
+			return int(slurm)
+		except ValueError:
+			pass
+	try:
+		return len(os.sched_getaffinity(0))
+	except AttributeError:
+		pass
+	return multiprocessing.cpu_count()
 
 
 def _local_sig(source,image,threshold=10,sky_in=5,sky_out=10):
@@ -362,7 +379,7 @@ class periodogram_detection():
         self.snr_lim = snr_lim
         self.fwhm = fwhm
         self.dao_peak = dao_peak
-        self.cpu = cpu
+        self.cpu = _available_cores() if cpu == -1 else cpu
         self.aperture_radius = aperture_radius
         self.snr_search_lim = snr_search_lim
         self.period_lim = period_lim
@@ -708,6 +725,53 @@ class periodogram_detection():
             except Exception:
                 pass
 
+    def validate_peak_centroids(self, top_n=2):
+        if self.sources is None:
+            return
+        from scipy.signal import find_peaks
+        ny, nx = self.power_norm.shape[1], self.power_norm.shape[2]
+        n_reselected = 0
+        for i in range(len(self.sources)):
+            x0 = self.sources['xcentroid'].iloc[i]
+            y0 = self.sources['ycentroid'].iloc[i]
+            xi, yi = int(round(x0)), int(round(y0))
+            r = int(np.ceil(self.aperture_radius))
+
+            def centroid_is_bright(p_ind):
+                im = self.power_norm[p_ind]
+                xlo = max(0, xi - r); xhi = min(nx, xi + r + 1)
+                ylo = max(0, yi - r); yhi = min(ny, yi + r + 1)
+                cutout = im[ylo:yhi, xlo:xhi]
+                yg, xg = np.mgrid[ylo:yhi, xlo:xhi]
+                in_ap = np.hypot(xg - x0, yg - y0) <= self.aperture_radius
+                ap_vals = cutout[in_ap[:cutout.shape[0], :cutout.shape[1]]]
+                if len(ap_vals) == 0:
+                    return False
+                centroid_val = im[yi, xi] if 0 <= yi < ny and 0 <= xi < nx else -np.inf
+                threshold = np.sort(ap_vals)[::-1][min(top_n - 1, len(ap_vals) - 1)]
+                return centroid_val >= threshold
+
+            p_ind = int(self.sources['power_ind'].iloc[i])
+            if centroid_is_bright(p_ind):
+                continue
+
+            # reselect: try candidate peaks in source power spectrum, ordered by power
+            power_norm_ap = self.source_power_norm[i, 1]
+            peaks, _ = find_peaks(power_norm_ap, height=np.max(power_norm_ap) * 0.3)
+            if len(peaks) == 0:
+                peaks = np.argsort(power_norm_ap)[::-1][:10]
+            peaks_sorted = peaks[np.argsort(power_norm_ap[peaks])[::-1]]
+
+            for candidate in peaks_sorted:
+                if centroid_is_bright(candidate):
+                    self.sources.loc[i, 'power_ind'] = candidate
+                    self.sources.loc[i, 'freq'] = self.freq[candidate]
+                    n_reselected += 1
+                    break
+
+        if n_reselected > 0:
+            print(f'validate_peak_centroids: reselected peak for {n_reselected} sources')
+
     def find_fundamental(self, odd_even_threshold=0.3):
         if self.lcs is None:
             self.make_lcs()
@@ -1020,6 +1084,8 @@ class periodogram_detection():
             self.find_peak_power()
             print('refining centroids')
             self.refine_centroids()
+            print('validating peak centroids')
+            self.validate_peak_centroids()
             print('finding fundamental period')
             self.find_fundamental()
             print('refining periods')
