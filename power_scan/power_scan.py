@@ -258,15 +258,45 @@ def compress_freq_groups(result):
     return result.loc[idx].reset_index(drop=True)
 
 
-def _aperture_frame(frame, aperture, annulus_aperture):
+def _aperture_frame(frame, x, y, radius, w_in, w_out, h_out):
     from astropy.stats import sigma_clip
     from scipy.signal import fftconvolve
-    from photutils.aperture import ApertureStats, aperture_photometry
+    from photutils.aperture import (CircularAperture, RectangularAnnulus,
+                                     ApertureStats, aperture_photometry)
+    aperture = CircularAperture([x, y], radius)
+    annulus_aperture = RectangularAnnulus([x, y], w_in=w_in, w_out=w_out, h_out=h_out)
     m = sigma_clip(frame, masked=True, sigma=5).mask
     mask = fftconvolve(m, np.ones((3, 3)), mode='same') > 0.5
     sky = ApertureStats(frame, annulus_aperture, mask=mask)
     phot = aperture_photometry(frame, aperture)
     return phot['aperture_sum'].value[0], aperture.area * sky.std
+
+
+def _find_peak_one(pn, pw, freq):
+    peaks, _ = find_peaks(pn, height=np.max(pn) * 0.5)
+    if len(peaks) == 0:
+        peaks = np.array([int(np.argmax(pn))])
+    p_ind = int(peaks[np.argmax(pw[peaks])])
+    return p_ind, freq[p_ind], pw[p_ind]
+
+
+def _harmonic_one_fn(src_freq, src_xcen, src_ycen, src_power_ind, power_norm, freq, radius):
+    peak_pn = float(power_norm[int(src_power_ind),
+                                int(round(src_ycen)),
+                                int(round(src_xcen))])
+    hp = _harmonic_power(float(src_freq), power_norm, freq,
+                         float(src_xcen), float(src_ycen), radius)
+    ratio = (hp / peak_pn) if (np.isfinite(hp) and peak_pn > 0) else np.nan
+    return hp, ratio
+
+
+def _refine_one_fn(freq, t, f, freq_window, samples_per_peak):
+    from astropy.timeseries import LombScargle
+    freq_fine, power_fine = LombScargle(t, f).autopower(
+        minimum_frequency=freq * (1 - freq_window),
+        maximum_frequency=freq * (1 + freq_window),
+        samples_per_peak=samples_per_peak)
+    return float(freq_fine[np.argmax(power_fine)])
 
 
 def _fundamental_one(lc, freq, src_power, src_power_ind, source_power_1d,
@@ -349,10 +379,8 @@ def Generate_LC(time,flux,x,y,frame_start=None,frame_end=None,method='sum',
         f = f[:frame_end+1]     
 
     if method.lower() == 'aperture':
-        aperture = CircularAperture([x, y], radius)
-        annulus_aperture = RectangularAnnulus([x,y], w_in=5, w_out=20,h_out=20)
-        results = Parallel(n_jobs=_available_cores(), backend='multiprocessing')(
-            delayed(_aperture_frame)(f[i], aperture, annulus_aperture)
+        results = Parallel(n_jobs=_available_cores(), backend='multiprocessing', verbose=1)(
+            delayed(_aperture_frame)(f[i], x, y, radius, 5, 20, 20)
             for i in range(len(f)))
         flux, flux_err = zip(*results)
         return t, np.array(flux), np.array(flux_err)
@@ -730,17 +758,10 @@ class periodogram_detection():
         if self.source_power is None:
             self.get_lightcurves()
 
-        def _peak_one(i):
-            pn = self.source_power_norm[i, 1]
-            pw = self.source_power[i, 1]
-            peaks, _ = find_peaks(pn, height=np.max(pn) * 0.5)
-            if len(peaks) == 0:
-                peaks = np.array([int(np.argmax(pn))])
-            p_ind = int(peaks[np.argmax(pw[peaks])])
-            return p_ind, self.freq[p_ind], pw[p_ind]
-
-        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
-            delayed(_peak_one)(i) for i in range(len(self.lcs)))
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
+            delayed(_find_peak_one)(
+                self.source_power_norm[i, 1], self.source_power[i, 1], self.freq)
+            for i in range(len(self.lcs)))
         p_inds, freqs, powers = zip(*results)
         self.sources['power_ind'] = list(p_inds)
         self.sources['freq']      = list(freqs)
@@ -817,7 +838,7 @@ class periodogram_detection():
         if self.lcs is None:
             self.make_lcs()
 
-        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
             delayed(_fundamental_one)(
                 self.lcs[j],
                 float(self.sources['freq'].iloc[j]),
@@ -858,7 +879,7 @@ class periodogram_detection():
             radius = self.aperture_radius
         if self.sources is None or len(self.sources) == 0:
             return
-        r_vals = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
+        r_vals = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
             delayed(_phase_coherence)(
                 self.time, self.data,
                 float(self.sources['xcentroid'].iloc[i]),
@@ -886,19 +907,14 @@ class periodogram_detection():
             radius = self.aperture_radius
         if self.sources is None or len(self.sources) == 0:
             return
-        def _harmonic_one(i):
-            src = self.sources.iloc[i]
-            peak_pn = float(self.power_norm[
-                int(src['power_ind']),
-                int(round(float(src['ycentroid']))),
-                int(round(float(src['xcentroid'])))])
-            hp = _harmonic_power(float(src['freq']), self.power_norm, self.freq,
-                                 float(src['xcentroid']), float(src['ycentroid']), radius)
-            ratio = (hp / peak_pn) if (np.isfinite(hp) and peak_pn > 0) else np.nan
-            return hp, ratio
-
-        results = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
-            delayed(_harmonic_one)(i) for i in range(len(self.sources)))
+        results = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
+            delayed(_harmonic_one_fn)(
+                float(self.sources['freq'].iloc[i]),
+                float(self.sources['xcentroid'].iloc[i]),
+                float(self.sources['ycentroid'].iloc[i]),
+                int(self.sources['power_ind'].iloc[i]),
+                self.power_norm, self.freq, radius)
+            for i in range(len(self.sources)))
         h_powers, h_ratios = zip(*results) if results else ([], [])
         self.sources = self.sources.copy()
         self.sources['harmonic_power'] = list(h_powers)
@@ -918,7 +934,7 @@ class periodogram_detection():
         """
         if self.sources is None or len(self.sources) == 0:
             return
-        scores = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
+        scores = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
             delayed(_odd_even_asymmetry)(
                 self.lcs[i][0], self.lcs[i][1],
                 float(self.sources['freq'].iloc[i]), n_bins)
@@ -1063,17 +1079,12 @@ class periodogram_detection():
             print(f'filter_sources: {n_before} → {n_after} sources')
 
     def refine_periods(self, samples_per_peak=100, freq_window=0.05):
-        def _refine_one(i):
-            freq = self.sources['freq'].iloc[i]
-            t, f = self.lcs[i][0], self.lcs[i][1]
-            freq_fine, power_fine = LombScargle(t, f).autopower(
-                minimum_frequency=freq * (1 - freq_window),
-                maximum_frequency=freq * (1 + freq_window),
-                samples_per_peak=samples_per_peak)
-            return float(freq_fine[np.argmax(power_fine)])
-
-        best_freqs = Parallel(n_jobs=self.cpu, backend='multiprocessing')(
-            delayed(_refine_one)(i) for i in range(len(self.sources)))
+        best_freqs = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
+            delayed(_refine_one_fn)(
+                float(self.sources['freq'].iloc[i]),
+                self.lcs[i][0], self.lcs[i][1],
+                freq_window, samples_per_peak)
+            for i in range(len(self.sources)))
         self.sources['freq']   = best_freqs
         self.sources['period'] = 1.0 / self.sources['freq'].values
         self.phase_fold()
