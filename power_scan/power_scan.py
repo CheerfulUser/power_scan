@@ -18,18 +18,26 @@ import sep
 # warnings.filterwarnings("ignore", category=NoDetectionsWarning)
 
 def _available_cores():
-	"""Return CPU cores available to this process, respecting SLURM allocations."""
-	slurm = os.environ.get('SLURM_CPUS_PER_TASK')
-	if slurm is not None:
-		try:
-			return int(slurm)
-		except ValueError:
-			pass
+	"""Return CPU cores available to this process, respecting SLURM allocations.
+
+	Takes the largest of the trustworthy signals so a job is never silently
+	throttled to 1 core when SLURM_CPUS_PER_TASK is unset or stale but the
+	cgroup actually grants more.
+	"""
+	candidates = []
+	for var in ('SLURM_CPUS_PER_TASK', 'SLURM_CPUS_ON_NODE'):
+		val = os.environ.get(var)
+		if val is not None:
+			try:
+				candidates.append(int(val))
+			except ValueError:
+				pass
 	try:
-		return len(os.sched_getaffinity(0))
+		candidates.append(len(os.sched_getaffinity(0)))
 	except AttributeError:
 		pass
-	return multiprocessing.cpu_count()
+	candidates.append(multiprocessing.cpu_count())
+	return max(c for c in candidates if c and c > 0)
 
 
 def _local_sig(source,image,threshold=10,sky_in=5,sky_out=10):
@@ -244,6 +252,10 @@ def _Spatial_group(result,min_samples=1,distance=1,njobs=-1,write_col='objid'):
 
     from sklearn.cluster import DBSCAN
 
+    # DBSCAN labels are positional, and downstream groupby().idxmax() + .loc[]
+    # require unique index labels; detections arrive concatenated with repeated
+    # indices, so reset to a clean RangeIndex first.
+    result = result.reset_index(drop=True)
     pos = np.array([result.xcentroid,result.ycentroid]).T
     cluster = DBSCAN(eps=distance,min_samples=min_samples,n_jobs=njobs).fit(pos)
     labels = cluster.labels_
