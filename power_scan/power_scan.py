@@ -1,4 +1,5 @@
 import os
+import re
 import multiprocessing
 import numpy as np
 from astropy.timeseries import LombScargle
@@ -312,7 +313,8 @@ def _refine_one_fn(freq, t, f, freq_window, samples_per_peak):
 
 
 def _fundamental_one(lc, freq, src_power, src_power_ind, source_power_1d,
-                     source_power_norm_1d, freq_array, period_high, odd_even_threshold):
+                     source_power_norm_1d, freq_array, period_high,
+                     odd_even_threshold, det_freqs):
     alias = np.array([0.5, 1.0, 2.0])
     t_span = lc[0, -1] - lc[0, 0]
     grad_sum = []
@@ -325,20 +327,30 @@ def _fundamental_one(lc, freq, src_power, src_power_ind, source_power_1d,
         grad_sum.append(metric)
     grad_sum = np.array(grad_sum)
     ind = int(np.argmin(grad_sum))
-    if ind != 1:
-        new_ind = int(np.argmin(np.abs(freq_array - freq * alias[ind])))
-        if new_ind < len(source_power_1d):
-            old_pn = source_power_norm_1d[int(src_power_ind)]
-            ratio   = source_power_1d[new_ind] / src_power if src_power != 0 else np.inf
-            ratio_n = source_power_norm_1d[new_ind] / old_pn if old_pn != 0 else np.inf
-            if (ratio < 0.2) and (ratio_n < 0.2):
-                ind = 1
-        else:
-            ind = 1
+
+    df = freq_array[1] - freq_array[0]
+
+    def _detected(a):
+        """True only if the source search produced a real point-source
+        detection in the power-cube image at this position at freq*a.
+        det_freqs holds the frequencies of all image detections coincident
+        with this source; a true (sub)harmonic must be among them, otherwise
+        the apparent power is noise/red-noise and is rejected."""
+        if len(det_freqs) == 0:
+            return False
+        target = freq * a
+        # tolerance: a couple of frequency bins, or 1% of the target frequency
+        tol = max(2.0 * df, 0.01 * target)
+        return bool(np.any(np.abs(det_freqs - target) <= tol))
+
+    if ind != 1 and not _detected(alias[ind]):
+        ind = 1
     if ind == 1:
         if period_high is not None and (2.0 / freq) <= period_high:
             asym = _odd_even_asymmetry(lc[0], lc[1], freq)
-            if np.isfinite(asym) and asym > odd_even_threshold:
+            # only accept the doubled fundamental if it is independently
+            # detected in the image, otherwise we snap onto an empty bin
+            if np.isfinite(asym) and asym > odd_even_threshold and _detected(2.0):
                 ind = 2
     snap_idx = int(np.argmin(np.abs(freq_array - freq * alias[ind])))
     return _refine_peak_freq(freq_array, source_power_norm_1d, snap_idx)
@@ -846,9 +858,28 @@ class periodogram_detection():
         if n_reselected > 0:
             print(f'validate_peak_centroids: reselected peak for {n_reselected} sources')
 
-    def find_fundamental(self, odd_even_threshold=0.3):
+    def find_fundamental(self, odd_even_threshold=0.3, match_radius=3.0):
         if self.lcs is None:
             self.make_lcs()
+
+        # For every source, collect the frequencies at which the source search
+        # produced a coincident image detection. An alias is only accepted as
+        # the fundamental if it is among these (i.e. detectable in the image).
+        det = self.detections
+        if det is not None and len(det) > 0:
+            det_x = det['xcentroid'].values
+            det_y = det['ycentroid'].values
+            det_f = det['freq'].values
+        else:
+            det_x = det_y = det_f = np.array([])
+
+        def _coincident_freqs(j):
+            xj = float(self.sources['xcentroid'].iloc[j])
+            yj = float(self.sources['ycentroid'].iloc[j])
+            if len(det_f) == 0:
+                return np.array([])
+            near = np.hypot(det_x - xj, det_y - yj) <= match_radius
+            return det_f[near]
 
         results = Parallel(n_jobs=self.cpu, backend='multiprocessing', verbose=1)(
             delayed(_fundamental_one)(
@@ -861,6 +892,7 @@ class periodogram_detection():
                 self.freq,
                 self._period_high,
                 odd_even_threshold,
+                _coincident_freqs(j),
             )
             for j in range(len(self.lcs)))
 
@@ -1056,6 +1088,8 @@ class periodogram_detection():
             else:
                 savename = self.savename
 
+        # Normalise to a single .csv extension (avoids power_scan_var.csv.csv)
+        savename = re.sub(r'(\.csv)+$', '', savename, flags=re.IGNORECASE) + '.csv'
         self.sources.to_csv(os.path.join(savepath, savename), index=False)
 
     #def save_lightcurves(self)
